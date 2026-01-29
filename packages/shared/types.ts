@@ -156,7 +156,7 @@ export enum UpsertMode {
 
 export enum CredentialMode {
   MERGE = "MERGE",
-  REPLACE = "REPLACE"
+  REPLACE = "REPLACE",
 }
 
 export enum SelfHealingMode {
@@ -171,6 +171,44 @@ export enum RunStatus {
   SUCCESS = "SUCCESS",
   FAILED = "FAILED",
   ABORTED = "ABORTED",
+}
+
+export enum RequestSource {
+  API = "api",
+  FRONTEND = "frontend",
+  SCHEDULER = "scheduler",
+  MCP = "mcp",
+  TOOL_CHAIN = "tool-chain",
+  WEBHOOK = "webhook",
+}
+
+export enum FilterTarget {
+  KEYS = "KEYS",
+  VALUES = "VALUES",
+  BOTH = "BOTH",
+}
+
+export enum FilterAction {
+  REMOVE = "REMOVE",
+  MASK = "MASK",
+  FAIL = "FAIL",
+}
+
+export enum RemoveScope {
+  FIELD = "FIELD", // Just this field - remove only the matched key-value
+  ITEM = "ITEM", // This item - remove the containing object
+  ENTRY = "ENTRY", // Entire entry - remove from top-level array
+}
+
+export interface ResponseFilter {
+  id: string;
+  name?: string;
+  enabled: boolean;
+  target: FilterTarget;
+  pattern: string;
+  action: FilterAction;
+  maskValue?: string;
+  scope?: RemoveScope; // Applies to REMOVE and MASK actions
 }
 
 export interface BaseConfig {
@@ -206,12 +244,7 @@ export interface ApiConfig extends BaseConfig {
   queryParams?: Record<string, any>;
   headers?: Record<string, any>;
   body?: string;
-  documentationUrl?: string;
-  responseSchema?: JSONSchema;
-  responseMapping?: JSONata;
-  authentication?: AuthType;
   pagination?: Pagination;
-  dataPath?: string;
 }
 
 export interface ExtractConfig extends BaseConfig {
@@ -233,18 +266,15 @@ export interface ExecutionStep {
   id: string;
   modify?: boolean;
   apiConfig: ApiConfig;
-  integrationId?: string;
+  systemId?: string;
   executionMode?: "DIRECT" | "LOOP";
   loopSelector?: string;
-  loopMaxIters?: number;
-  inputMapping?: JSONata;
-  responseMapping?: JSONata;
   failureBehavior?: "FAIL" | "CONTINUE";
 }
 
 export interface Tool extends BaseConfig {
   steps: ExecutionStep[];
-  integrationIds?: string[];
+  systemIds?: string[];
   finalTransform?: JSONata;
   inputSchema?: JSONSchema;
   responseSchema?: JSONSchema;
@@ -252,6 +282,7 @@ export interface Tool extends BaseConfig {
   originalResponseSchema?: JSONSchema;
   folder?: string;
   archived?: boolean;
+  responseFilters?: ResponseFilter[];
 }
 
 export interface ToolStepResult {
@@ -267,7 +298,7 @@ export interface ToolResult extends BaseResult {
 }
 
 export interface CallEndpointArgs {
-  integrationId?: string;
+  systemId?: string;
   method: HttpMethod;
   url: string;
   headers?: Record<string, string>;
@@ -285,7 +316,7 @@ export interface CallEndpointResult {
   duration: number;
 }
 
-export interface Integration extends BaseConfig {
+export interface System extends BaseConfig {
   name?: string;
   type?: string;
   urlHost?: string;
@@ -299,10 +330,13 @@ export interface Integration extends BaseConfig {
   specificInstructions?: string;
   documentationKeywords?: string[];
   icon?: string;
+  metadata?: Record<string, any>;
+  templateName?: string;
 }
 
-export interface IntegrationInput {
+export interface SystemInput {
   id: string;
+  name?: string;
   urlHost?: string;
   urlPath?: string;
   documentationUrl?: string;
@@ -310,7 +344,10 @@ export interface IntegrationInput {
   documentationPending?: boolean;
   specificInstructions?: string;
   documentationKeywords?: string[];
+  icon?: string;
   credentials?: Record<string, string>;
+  metadata?: Record<string, any>;
+  templateName?: string;
 }
 
 export interface SuggestedTool {
@@ -319,7 +356,7 @@ export interface SuggestedTool {
   inputSchema?: JSONSchema;
   responseSchema?: JSONSchema;
   steps: Array<{
-    integrationId?: string;
+    systemId?: string;
     instruction?: string;
   }>;
   reason: string;
@@ -348,7 +385,7 @@ export type ExtractInputRequest = {
 
 export type ToolInputRequest = {
   id?: string;
-  workflow?: Tool; // cannot change to tool because of graphql
+  workflow?: Tool;
 };
 
 // Legacy alias
@@ -364,21 +401,25 @@ export type RequestOptions = {
   testMode?: boolean;
 };
 
+export interface RunMetadata {
+  startedAt: string; // ISO string
+  completedAt?: string; // ISO string
+  durationMs?: number;
+}
+
 export interface Run {
-  id: string;
+  runId: string;
   toolId: string;
-  orgId?: string;
+  tool?: Tool;
   status: RunStatus;
-  toolConfig?: Tool;
   toolPayload?: Record<string, any>;
-  toolResult?: any;
+  data?: any;
+  error?: string;
   stepResults?: ToolStepResult[];
   options?: RequestOptions;
-  requestSource?: string;
-  error?: string;
+  requestSource?: RequestSource;
   traceId?: string;
-  startedAt: Date;
-  completedAt?: Date;
+  metadata: RunMetadata;
 }
 
 export interface ApiCallArgs {
@@ -423,7 +464,7 @@ export type WorkflowArgs = ToolArgs;
 export interface BuildToolArgs {
   instruction: string;
   payload?: Record<string, any>;
-  integrationIds?: string[];
+  systemIds?: string[];
   responseSchema?: JSONSchema;
   save?: boolean;
   verbose?: boolean;
@@ -434,8 +475,10 @@ export interface BuildToolArgs {
 export type BuildWorkflowArgs = BuildToolArgs;
 
 export interface ToolDiff {
-  old_string: string;
-  new_string: string;
+  op: "add" | "remove" | "replace" | "move" | "copy" | "test";
+  path: string;
+  value?: any;
+  from?: string;
 }
 
 export interface FixToolArgs {
@@ -443,7 +486,7 @@ export interface FixToolArgs {
   fixInstructions: string;
   lastError?: string;
   stepResults?: ToolStepResult[];
-  integrationIds?: string[];
+  systemIds?: string[];
 }
 
 export interface FixToolResult {
@@ -452,7 +495,7 @@ export interface FixToolResult {
 }
 
 export interface GenerateStepConfigArgs {
-  integrationId?: string;
+  systemId?: string;
   currentDataSelector?: string;
   currentStepConfig?: Partial<ApiConfig>;
   stepInput?: Record<string, any>;
@@ -460,14 +503,14 @@ export interface GenerateStepConfigArgs {
   errorMessage?: string;
 }
 
-export type IntegrationList = {
-  items: Integration[];
+export type SystemList = {
+  items: System[];
   total: number;
 };
 
 export type ToolScheduleInput = {
   id?: string;
-  workflowId?: string; // cannot change to toolId because of graphql
+  toolId?: string;
   cronExpression?: string;
   timezone?: string;
   enabled?: boolean;
@@ -477,7 +520,7 @@ export type ToolScheduleInput = {
 
 export type ToolSchedule = {
   id: string;
-  workflowId: string; // cannot change to toolId because of graphql
+  toolId: string;
   cronExpression: string;
   timezone: string;
   enabled: boolean;
@@ -489,10 +532,6 @@ export type ToolSchedule = {
   updatedAt: Date;
 };
 
-// Legacy aliases
-export type WorkflowScheduleInput = ToolScheduleInput;
-export type WorkflowSchedule = ToolSchedule;
-
 export enum DiscoveryRunStatus {
   PENDING = "PENDING",
   PROCESSING = "PROCESSING",
@@ -501,7 +540,7 @@ export enum DiscoveryRunStatus {
   ABORTED = "ABORTED",
 }
 
-export type DiscoverySourceType = "file" | "url" | "integration";
+export type DiscoverySourceType = "file" | "url" | "system";
 
 export interface DiscoverySource {
   id: string;
@@ -511,7 +550,7 @@ export interface DiscoverySource {
 export interface DiscoveryRunData {
   title?: string;
   description?: string;
-  systems?: ExtendedIntegration[];
+  systems?: ExtendedSystem[];
   error?: string;
 }
 
@@ -562,7 +601,7 @@ export interface BatchFileUploadResponse {
   }>;
 }
 
-export interface ExtendedIntegration extends Omit<Integration, "icon"> {
+export interface ExtendedSystem extends Omit<System, "icon"> {
   icon?: {
     name: string;
     source: "simpleicons" | "lucide";
@@ -572,11 +611,26 @@ export interface ExtendedIntegration extends Omit<Integration, "icon"> {
   confidence: "high" | "medium" | "low";
   evidence: string;
   systemDetails?: string;
-  matchedIntegrationId?: string; // If set, discovered system matches this existing integration
+  matchedSystemId?: string; // If set, discovered system matches this existing system
+  potentialConnections?: string[];
 }
 
 export interface DiscoveryResult {
   title: string;
   description: string;
-  systems: ExtendedIntegration[];
+  systems: ExtendedSystem[];
+}
+
+export enum ConfirmationAction {
+  CONFIRMED = "confirmed",
+  DECLINED = "declined",
+  PARTIAL = "partial",
+}
+
+export interface AgentRequest {
+  agentId: string;
+  messages: Message[];
+  runtimeContext?: string;
+  agentParams?: Record<string, any>;
+  filePayloads?: Record<string, any>;
 }

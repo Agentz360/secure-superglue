@@ -29,8 +29,8 @@ import {
 export class HttpStepExecutionStrategy implements StepExecutionStrategy {
   readonly version = "1.0.0";
 
-  async shouldExecute(stepConfig: StepConfig): Promise<boolean> {
-    return stepConfig.method in HttpMethod && stepConfig.urlHost?.startsWith("http");
+  shouldExecute(resolvedUrlHost: string): boolean {
+    return resolvedUrlHost.startsWith("http");
   }
 
   async executeStep(input: StepExecutionInput): Promise<StepStrategyExecutionResult> {
@@ -663,14 +663,7 @@ export async function callHttp({
       }
 
       previousResponseHash = currentResponseHash;
-
-      if (Array.isArray(parsedResponseData)) {
-        allResults = allResults.concat(parsedResponseData);
-      } else if (!config.dataPath) {
-        allResults = smartMergeResponses(allResults, parsedResponseData);
-      } else if (parsedResponseData) {
-        allResults.push(parsedResponseData);
-      }
+      allResults = smartMergeResponses(allResults, parsedResponseData);
     } else {
       if (Array.isArray(parsedResponseData)) {
         const pageSize = parseInt(config.pagination?.pageSize || "50");

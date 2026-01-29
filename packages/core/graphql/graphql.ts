@@ -1,35 +1,25 @@
 import { GraphQLUpload } from "graphql-upload-ts";
 import fs from "node:fs";
 import { callEndpointResolver } from "./resolvers/call-endpoint.js";
-import { deleteApiResolver } from "./resolvers/delete.js";
 import { extractResolver } from "./resolvers/extract.js";
 import {
   generateInstructionsResolver,
   generateStepConfigResolver,
   generateTransformResolver,
 } from "./resolvers/generate.js";
-import { getApiResolver, getRunResolver } from "./resolvers/get.js";
 import {
   cacheOauthClientCredentialsResolver,
-  deleteIntegrationResolver,
-  findRelevantIntegrationsResolver,
-  getIntegrationResolver,
+  deleteSystemResolver,
+  getSystemResolver,
   getOAuthClientCredentialsResolver,
-  listIntegrationsResolver,
-  searchIntegrationDocumentationResolver,
-  upsertIntegrationResolver,
-} from "./resolvers/integrations.js";
-import { listApisResolver, listRunsResolver } from "./resolvers/list.js";
+  listSystemsResolver,
+  searchSystemDocumentationResolver,
+  upsertSystemResolver,
+} from "./resolvers/systems.js";
 import { logsResolver } from "./resolvers/logs.js";
 import { renameWorkflowResolver } from "./resolvers/rename-workflow.js";
 import { JSONResolver, JSONSchemaResolver, JSONataResolver } from "./resolvers/scalars.js";
 import { getTenantInfoResolver, setTenantInfoResolver } from "./resolvers/tenant.js";
-import { upsertApiResolver } from "./resolvers/upsert.js";
-import {
-  deleteWorkflowScheduleResolver,
-  listWorkflowSchedulesResolver,
-  upsertWorkflowScheduleResolver,
-} from "./resolvers/workflow-scheduler.js";
 import {
   abortToolExecutionResolver,
   buildWorkflowResolver,
@@ -40,26 +30,20 @@ import {
   getWorkflowResolver,
   listWorkflowsResolver,
   upsertWorkflowResolver,
-} from "./resolvers/workflow.js";
+} from "./resolvers/tools.js";
 
 export const typeDefs = fs.readFileSync("../../api.graphql", "utf8");
 
 export const resolvers = {
   Query: {
-    listRuns: listRunsResolver,
-    getRun: getRunResolver,
-    listApis: listApisResolver,
-    getApi: getApiResolver,
     getTenantInfo: getTenantInfoResolver,
     getWorkflow: getWorkflowResolver,
     listWorkflows: listWorkflowsResolver,
     generateInstructions: generateInstructionsResolver,
-    getIntegration: getIntegrationResolver,
-    listIntegrations: listIntegrationsResolver,
-    searchIntegrationDocumentation: searchIntegrationDocumentationResolver,
-    findRelevantIntegrations: findRelevantIntegrationsResolver,
+    getSystem: getSystemResolver,
+    listSystems: listSystemsResolver,
+    searchSystemDocumentation: searchSystemDocumentationResolver,
     findRelevantTools: findRelevantToolsResolver,
-    listWorkflowSchedules: listWorkflowSchedulesResolver,
   },
   Mutation: {
     setTenantInfo: setTenantInfoResolver,
@@ -70,14 +54,10 @@ export const resolvers = {
     upsertWorkflow: upsertWorkflowResolver,
     deleteWorkflow: deleteWorkflowResolver,
     renameWorkflow: renameWorkflowResolver,
-    upsertApi: upsertApiResolver,
-    deleteApi: deleteApiResolver,
-    upsertIntegration: upsertIntegrationResolver,
+    upsertSystem: upsertSystemResolver,
     cacheOauthClientCredentials: cacheOauthClientCredentialsResolver,
     getOAuthClientCredentials: getOAuthClientCredentialsResolver,
-    deleteIntegration: deleteIntegrationResolver,
-    upsertWorkflowSchedule: upsertWorkflowScheduleResolver,
-    deleteWorkflowSchedule: deleteWorkflowScheduleResolver,
+    deleteSystem: deleteSystemResolver,
     generateStepConfig: generateStepConfigResolver,
     generateTransform: generateTransformResolver,
     callEndpoint: callEndpointResolver,
@@ -116,8 +96,6 @@ export const resolvers = {
       const parentField = info.path.prev.key;
 
       switch (parentField) {
-        case "call":
-          return "ApiConfig";
         case "extract":
           return "ExtractConfig";
         default:

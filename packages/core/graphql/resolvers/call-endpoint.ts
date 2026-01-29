@@ -1,7 +1,7 @@
-import { CallEndpointArgs, CallEndpointResult, Integration } from "@superglue/shared";
+import { CallEndpointArgs, CallEndpointResult, System } from "@superglue/shared";
 import { flattenAndNamespaceCredentials } from "@superglue/shared/utils";
 import { GraphQLResolveInfo } from "graphql";
-import { IntegrationManager } from "../../integrations/integration-manager.js";
+import { SystemManager } from "../../systems/system-manager.js";
 import { replaceVariables } from "../../utils/helpers.js";
 import { logMessage } from "../../utils/logs.js";
 import { GraphQLRequestContext } from "../types.js";
@@ -15,7 +15,7 @@ export const callEndpointResolver = async (
   const startTime = Date.now();
   const metadata = context.toMetadata();
 
-  const { integrationId, method, url, headers = {}, body, timeout = 30000 } = args;
+  const { systemId, method, url, headers = {}, body, timeout = 30000 } = args;
   const validMethods = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"];
 
   if (!method || !url || !validMethods.includes(method.toUpperCase())) {
@@ -26,27 +26,28 @@ export const callEndpointResolver = async (
     };
   }
 
-  let integration: Integration | null = null;
-  let integrationFetchFailed = false;
+  let system: System | null = null;
+  let systemFetchFailed = false;
 
-  if (integrationId) {
+  if (systemId) {
     try {
-      const integrationManager = new IntegrationManager(integrationId, context.datastore, metadata);
-      await integrationManager.refreshTokenIfNeeded();
-      integration = await integrationManager.getIntegration();
-      logMessage("debug", `Loaded integration ${integrationId}`, metadata);
+      const systemManager = new SystemManager(systemId, context.datastore, metadata);
+      await systemManager.enrichWithTemplateCredentials();
+      await systemManager.refreshTokenIfNeeded();
+      system = await systemManager.getSystem();
+      logMessage("debug", `Loaded system ${systemId}`, metadata);
     } catch (error) {
-      integrationFetchFailed = true;
+      systemFetchFailed = true;
       logMessage(
         "warn",
-        `Integration ${integrationId} not found or failed to load: ${error}. Proceeding without credentials.`,
+        `System ${systemId} not found or failed to load: ${error}. Proceeding without credentials.`,
         metadata,
       );
     }
   }
 
-  const credentialVariables: Record<string, any> = integration
-    ? flattenAndNamespaceCredentials([integration])
+  const credentialVariables: Record<string, any> = system
+    ? flattenAndNamespaceCredentials([system])
     : {};
 
   let finalUrl: string;
@@ -61,13 +62,13 @@ export const callEndpointResolver = async (
     const errorMsg = error instanceof Error ? error.message : String(error);
     let contextMessage = "";
 
-    if (integrationFetchFailed) {
-      contextMessage = ` The integration '${integrationId}' could not be found or loaded.`;
-    } else if (integrationId && integration) {
+    if (systemFetchFailed) {
+      contextMessage = ` The system '${systemId}' could not be found or loaded.`;
+    } else if (systemId && system) {
       const availableKeys = Object.keys(credentialVariables || {});
-      contextMessage = ` Available credentials in integration '${integrationId}': ${availableKeys.length > 0 ? availableKeys.join(", ") : "(none)"}`;
-    } else if (!integrationId) {
-      contextMessage = ` No integrationId was provided. To use credential placeholders, specify an integrationId.`;
+      contextMessage = ` Available credentials in system '${systemId}': ${availableKeys.length > 0 ? availableKeys.join(", ") : "(none)"}`;
+    } else if (!systemId) {
+      contextMessage = ` No systemId was provided. To use credential placeholders, specify a systemId.`;
     }
 
     return {

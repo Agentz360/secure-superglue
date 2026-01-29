@@ -1,5 +1,5 @@
 import { UploadedFileInfo } from "@/src/lib/file-utils";
-import { ExecutionStep, Integration } from "@superglue/shared";
+import { ExecutionStep, System, ResponseFilter } from "@superglue/shared";
 
 export interface PayloadState {
   manualPayloadText: string;
@@ -17,17 +17,19 @@ export interface ToolDefinition {
   responseSchema: any | null;
   folder?: string;
   isArchived: boolean;
+  responseFilters: ResponseFilter[];
 }
 
 export interface ToolConfigContextValue {
   tool: ToolDefinition;
   steps: ExecutionStep[];
   payload: PayloadState;
-  integrations: Integration[];
+  systems: System[];
 
   inputSchema: string | null;
   responseSchema: string;
   finalTransform: string;
+  responseFilters: ResponseFilter[];
 
   setToolId: (id: string) => void;
   setInstruction: (instruction: string) => void;
@@ -36,10 +38,12 @@ export interface ToolConfigContextValue {
   setResponseSchema: (schema: string) => void;
   setFolder: (folder: string | undefined) => void;
   setIsArchived: (archived: boolean) => void;
+  setResponseFilters: (filters: ResponseFilter[]) => void;
 
   setPayloadText: (text: string) => void;
   setUploadedFiles: (files: UploadedFileInfo[]) => void;
   setFilePayloads: (payloads: Record<string, any>) => void;
+  setFilesAndPayloads: (files: UploadedFileInfo[], payloads: Record<string, any>) => void;
   markPayloadEdited: () => void;
 
   addStep: (step: ExecutionStep, afterIndex?: number) => void;
@@ -49,7 +53,7 @@ export interface ToolConfigContextValue {
 
   getStepConfig: (stepId: string) => ExecutionStep | undefined;
   getStepIndex: (stepId: string) => number;
-  getStepIntegration: (stepId: string) => Integration | undefined;
+  getStepSystem: (stepId: string) => System | undefined;
 }
 
 export type StepStatus = "pending" | "running" | "completed" | "failed" | "aborted";
@@ -174,4 +178,7 @@ export interface ExecutionContextValue {
   getCategorizedVariables: (stepId: string) => CategorizedVariables;
   getCategorizedSources: (stepId: string) => CategorizedSources;
   getDataSelectorResult: (stepId: string) => DataSelectorResult;
+
+  // === AGENT CONTEXT HELPERS ===
+  getExecutionStateSummary: () => string;
 }

@@ -24,13 +24,13 @@ describe("ToolExecutor - Failure Behavior", () => {
         id: "test-tool",
         steps: [step],
         finalTransform: "(sourceData) => sourceData",
-        integrationIds: [],
+        systemIds: [],
       };
 
       const executor = new ToolExecutor({
         tool,
         metadata: { traceId: "test-trace", orgId: "" },
-        integrations: [],
+        systems: [],
       });
 
       // Mock the strategy registry to fail on second iteration
@@ -78,13 +78,13 @@ describe("ToolExecutor - Failure Behavior", () => {
         id: "test-tool",
         steps: [step],
         finalTransform: "(sourceData) => sourceData",
-        integrationIds: [],
+        systemIds: [],
       };
 
       const executor = new ToolExecutor({
         tool,
         metadata: { traceId: "test-trace", orgId: "" },
-        integrations: [],
+        systems: [],
       });
 
       // Mock the strategy registry to fail on iterations 2 and 4
@@ -163,13 +163,13 @@ describe("ToolExecutor - Failure Behavior", () => {
         id: "test-tool",
         steps: [step],
         finalTransform: "(sourceData) => sourceData",
-        integrationIds: [],
+        systemIds: [],
       };
 
       const executor = new ToolExecutor({
         tool,
         metadata: { traceId: "test-trace", orgId: "" },
-        integrations: [],
+        systems: [],
       });
 
       let callCount = 0;
@@ -226,13 +226,13 @@ describe("ToolExecutor - Failure Behavior", () => {
         id: "test-tool",
         steps: [step],
         finalTransform: "(sourceData) => sourceData",
-        integrationIds: [],
+        systemIds: [],
       };
 
       const executor = new ToolExecutor({
         tool,
         metadata: { traceId: "test-trace", orgId: "" },
-        integrations: [],
+        systems: [],
       });
 
       (executor as any).strategyRegistry = {
@@ -297,13 +297,13 @@ describe("ToolExecutor - Failure Behavior", () => {
         id: "test-tool",
         steps: [step1, step2],
         finalTransform: "(sourceData) => sourceData",
-        integrationIds: [],
+        systemIds: [],
       };
 
       const executor = new ToolExecutor({
         tool,
         metadata: { traceId: "test-trace", orgId: "" },
-        integrations: [],
+        systems: [],
       });
 
       let stepExecuted = 0;
@@ -374,13 +374,13 @@ describe("ToolExecutor - Failure Behavior", () => {
         id: "test-tool",
         steps: [step1, step2],
         finalTransform: "(sourceData) => sourceData",
-        integrationIds: [],
+        systemIds: [],
       };
 
       const executor = new ToolExecutor({
         tool,
         metadata: { traceId: "test-trace", orgId: "" },
-        integrations: [],
+        systems: [],
       });
 
       let stepExecuted = 0;
@@ -431,13 +431,13 @@ describe("ToolExecutor - Failure Behavior", () => {
         id: "test-tool",
         steps: [step],
         finalTransform: "(sourceData) => sourceData",
-        integrationIds: [],
+        systemIds: [],
       };
 
       const executor = new ToolExecutor({
         tool,
         metadata: { traceId: "test-trace", orgId: "" },
-        integrations: [],
+        systems: [],
       });
 
       let callCount = 0;

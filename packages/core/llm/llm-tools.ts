@@ -1,74 +1,78 @@
-import { anthropic } from "@ai-sdk/anthropic";
-import { google } from "@ai-sdk/google";
-import { openai } from "@ai-sdk/openai";
-import { Integration, ServiceMetadata } from "@superglue/shared";
-import { DocumentationSearch } from "../documentation/documentation-search.js";
+import { tavilySearch } from "@tavily/ai-sdk";
+import { System, ServiceMetadata } from "@superglue/shared";
 import { LLMToolDefinition, LLMToolImplementation } from "./llm-tool-utils.js";
+import { SystemManager } from "../systems/system-manager.js";
+import { DocumentationSearch } from "../documentation/documentation-search.js";
 import { sanitizeInstructionSuggestions, runCodeInIVM } from "../utils/helpers.js";
 import { LanguageModel, LLMMessage } from "./llm-base-model.js";
 import { GENERATE_INSTRUCTIONS_SYSTEM_PROMPT } from "../context/context-prompts.js";
-import { searchIntegrationDocumentationResolver } from "../graphql/resolvers/integrations.js";
 
 export function getWebSearchTool(): any {
-  const provider = process.env.LLM_PROVIDER?.toLowerCase();
-  switch (provider) {
-    case "openai":
-      return openai.tools.webSearch();
-    case "anthropic":
-      return anthropic.tools.webSearch_20250305({ maxUses: 5 });
-    case "gemini":
-      return google.tools.googleSearch({});
-    default:
-      return null;
+  if (!process.env.TAVILY_API_KEY) {
+    return null;
   }
+  return tavilySearch({
+    searchDepth: "advanced",
+    maxResults: 5,
+    includeAnswer: true,
+  });
 }
 
 export interface searchDocumentationToolContext extends ServiceMetadata {
-  integration: Integration;
+  system: System;
 }
 
 export const searchDocumentationToolImplementation: LLMToolImplementation<
   searchDocumentationToolContext
 > = async (args, context) => {
   const { query } = args;
-  const { integration, ...metadata } = context;
+  const { system, ...metadata } = context;
 
-  if (!integration) {
+  if (!system) {
     return {
       success: false,
       error:
-        "Integration not provided in context. The search_documentation tool requires an integration to be passed in the tool executor context.",
+        "System not provided in context. The search_documentation tool requires a system to be passed in the tool executor context.",
     };
   }
 
   try {
-    if (!integration.documentation || integration.documentation.length <= 50) {
+    if (!system.documentation && !system.openApiSchema && !system.specificInstructions) {
       return {
         success: true,
         data: {
-          integrationId: integration.id,
+          systemId: system.id,
           query,
           summary:
-            "No documentation available for this integration. Try to execute the API call without documentation using your own knowledge or web search. Do not use the search_documentation tool.",
+            "No documentation available for this system. Try to execute the API call without documentation using your own knowledge or web search. Do not use the search_documentation tool.",
+        },
+      };
+    }
+    const systemManager = SystemManager.fromSystem(system, null, metadata);
+    const searchResults = await systemManager.searchDocumentation(query);
+
+    // Handle empty results or no documentation
+    if (
+      !searchResults ||
+      searchResults.trim().length === 0 ||
+      searchResults === "no documentation provided"
+    ) {
+      return {
+        success: true,
+        data: {
+          systemId: system.id,
+          query,
+          summary: `No relevant sections found for keywords: "${query}". Try different or broader keywords, or verify that the documentation contains information about what you're looking for.`,
         },
       };
     }
 
-    const documentationSearch = new DocumentationSearch(metadata);
-    const searchResults = documentationSearch.extractRelevantSections(
-      integration.documentation,
-      query,
-      5,
-      2000,
-      integration.openApiSchema,
-    );
-
     return {
       success: true,
       data: {
-        integrationId: integration.id,
+        systemId: system.id,
         query,
-        summary: searchResults || "No matches found for your query.",
+        summary: searchResults,
       },
     };
   } catch (error) {
@@ -98,43 +102,55 @@ export const searchDocumentationToolDefinition: LLMToolDefinition = {
 };
 
 export interface InstructionGenerationContext extends ServiceMetadata {
-  integrations: Integration[];
+  systems: System[];
 }
 
 export const generateInstructionsToolImplementation: LLMToolImplementation<
   InstructionGenerationContext
 > = async (args, context) => {
-  const { integrations } = context;
+  const { systems } = context;
   const metadata = context as ServiceMetadata;
 
-  if (!integrations || integrations.length === 0) {
+  if (!systems || systems.length === 0) {
     return {
       success: false,
-      error: "No integrations provided in context",
+      error: "No systems provided in context",
     };
   }
 
-  // Prepare integration summaries with smart documentation truncation
-  const integrationSummaries = integrations.map((integration) => {
+  // Prepare system summaries with smart documentation truncation
+  const systemSummaries = systems.map((system) => {
     // Use DocumentationSearch to intelligently truncate documentation
     // Focus on getting started, authentication, and basic operations
     const documentationSearch = new DocumentationSearch(metadata);
-    const truncatedDocs = integration.documentation
+    let truncatedDocs = system.documentation
       ? documentationSearch.extractRelevantSections(
-          integration.documentation,
+          system.documentation,
           "getting started overview endpoints reference",
           10, // max_chunks
           1000, // chunk_size - smaller chunks for summaries
-          integration.openApiSchema,
+          system.openApiSchema,
         )
       : "";
 
+    // Always append specific instructions if they exist
+    if (system.specificInstructions && system.specificInstructions.trim().length > 0) {
+      if (truncatedDocs) {
+        truncatedDocs =
+          truncatedDocs +
+          "\n\n=== SPECIFIC INSTRUCTIONS ===\n\n" +
+          system.specificInstructions.trim();
+      } else {
+        truncatedDocs = "=== SPECIFIC INSTRUCTIONS ===\n\n" + system.specificInstructions.trim();
+      }
+    }
+
     return {
-      id: integration.id,
-      urlHost: integration.urlHost,
-      urlPath: integration.urlPath,
+      id: system.id,
+      urlHost: system.urlHost,
+      urlPath: system.urlPath,
       documentation: truncatedDocs.slice(0, 1000) + (truncatedDocs.length > 1000 ? "..." : ""),
-      documentationUrl: integration.documentationUrl,
+      documentationUrl: system.documentationUrl,
     };
   });
 
@@ -145,7 +161,7 @@ export const generateInstructionsToolImplementation: LLMToolImplementation<
     },
     {
       role: "user",
-      content: `<integrations>${JSON.stringify(integrationSummaries, null, 2)}</integrations>`,
+      content: `<systems>${JSON.stringify(systemSummaries, null, 2)}</systems>`,
     },
   ];
 
@@ -173,8 +189,7 @@ export const generateInstructionsToolImplementation: LLMToolImplementation<
 
 export const generateInstructionsToolDefinition: LLMToolDefinition = {
   name: "generate_instructions",
-  description:
-    "Generate specific, implementable workflow instructions for the available integrations.",
+  description: "Generate specific, implementable workflow instructions for the available systems.",
   arguments: {
     type: "object",
     properties: {},

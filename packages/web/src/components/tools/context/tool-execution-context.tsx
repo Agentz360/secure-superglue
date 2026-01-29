@@ -82,8 +82,41 @@ const emptyStepTemplateData: StepTemplateData = {
   canExecute: false,
 };
 
+const STATUS_INFO = {
+  running: {
+    text: "Running",
+    color: "text-amber-600 dark:text-amber-400",
+    dotColor: "bg-amber-600 dark:bg-amber-400",
+    animate: true,
+  },
+  fixing: {
+    text: "Fixing",
+    color: "text-amber-600 dark:text-amber-400",
+    dotColor: "bg-amber-600 dark:bg-amber-400",
+    animate: true,
+  },
+  completed: {
+    text: "Completed",
+    color: "text-muted-foreground",
+    dotColor: "bg-green-600 dark:bg-green-400",
+    animate: false,
+  },
+  failed: {
+    text: "Failed",
+    color: "text-red-600 dark:text-red-400",
+    dotColor: "bg-red-600 dark:bg-red-400",
+    animate: false,
+  },
+  pending: {
+    text: "Pending",
+    color: "text-gray-500 dark:text-gray-400",
+    dotColor: "bg-gray-500 dark:bg-gray-400",
+    animate: false,
+  },
+} as const satisfies Record<string, StepStatusInfo>;
+
 export function ExecutionProvider({ children }: ExecutionProviderProps) {
-  const { steps, payload, integrations } = useToolConfig();
+  const { steps, payload, systems } = useToolConfig();
 
   const [stepExecutions, setStepExecutions] = useState<Record<string, StepExecutionState>>({});
   const [isExecutingAny, setIsExecutingAny] = useState(false);
@@ -117,7 +150,7 @@ export function ExecutionProvider({ children }: ExecutionProviderProps) {
   const setStepRunning = useCallback((stepId: string, runId: string) => {
     setStepExecutions((prev) => ({
       ...prev,
-      [stepId]: { ...(prev[stepId] ?? DEFAULT_STEP_EXECUTION), status: "running", runId },
+      [stepId]: { ...DEFAULT_STEP_EXECUTION, status: "running", runId },
     }));
   }, []);
 
@@ -166,7 +199,7 @@ export function ExecutionProvider({ children }: ExecutionProviderProps) {
         id: s.id,
         executionMode: s.executionMode,
         loopSelector: s.loopSelector,
-        integrationId: s.integrationId,
+        systemId: s.systemId,
         apiConfig: s.apiConfig,
         modify: s.modify,
         failureBehavior: s.failureBehavior,
@@ -242,6 +275,8 @@ export function ExecutionProvider({ children }: ExecutionProviderProps) {
   }, []);
 
   const setTransformRunning = useCallback((_runId: string) => {
+    setFinalResultState(null);
+    setFinalErrorState(null);
     setTransformStatusState("running");
   }, []);
 
@@ -306,48 +341,21 @@ export function ExecutionProvider({ children }: ExecutionProviderProps) {
 
   const getStepStatusInfo = useCallback(
     (stepId: string): StepStatusInfo => {
-      const exec = stepExecutions[stepId];
-      const running = exec?.status === "running";
-      const failed = exec?.status === "failed";
-      const completed = exec?.status === "completed";
-      const aborted = exec?.status === "aborted";
+      if (stepId === "__final_transform__") {
+        if (transformStatus === "fixing") return STATUS_INFO.fixing;
+        if (transformStatus === "running") return STATUS_INFO.running;
+        if (transformStatus === "completed") return STATUS_INFO.completed;
+        if (transformStatus === "failed") return STATUS_INFO.failed;
+        return STATUS_INFO.pending;
+      }
 
-      if (running)
-        return {
-          text: "Running",
-          color: "text-amber-600 dark:text-amber-400",
-          dotColor: "bg-amber-600 dark:bg-amber-400",
-          animate: true,
-        };
-      if (aborted)
-        return {
-          text: "Pending",
-          color: "text-gray-500 dark:text-gray-400",
-          dotColor: "bg-gray-500 dark:bg-gray-400",
-          animate: false,
-        };
-      if (failed)
-        return {
-          text: "Failed",
-          color: "text-red-600 dark:text-red-400",
-          dotColor: "bg-red-600 dark:bg-red-400",
-          animate: false,
-        };
-      if (completed)
-        return {
-          text: "Completed",
-          color: "text-muted-foreground",
-          dotColor: "bg-green-600 dark:bg-green-400",
-          animate: false,
-        };
-      return {
-        text: "Pending",
-        color: "text-gray-500 dark:text-gray-400",
-        dotColor: "bg-gray-500 dark:bg-gray-400",
-        animate: false,
-      };
+      const status = stepExecutions[stepId]?.status;
+      if (status === "running") return STATUS_INFO.running;
+      if (status === "completed") return STATUS_INFO.completed;
+      if (status === "failed") return STATUS_INFO.failed;
+      return STATUS_INFO.pending;
     },
-    [stepExecutions],
+    [stepExecutions, transformStatus],
   );
 
   const canExecuteStep = useCallback(
@@ -508,24 +516,24 @@ export function ExecutionProvider({ children }: ExecutionProviderProps) {
       const dsResult = dataSelectorResults[stepId] || { output: null, error: null };
       const currentItemObj = deriveCurrentItem(dsResult.output);
 
-      const linkedIntegration =
-        step.integrationId && integrations
-          ? integrations.find((int) => int.id === step.integrationId)
-          : undefined;
+      const linkedSystem =
+        step.systemId && systems ? systems.find((sys) => sys.id === step.systemId) : undefined;
 
-      const integrationCredentials = flattenAndNamespaceCredentials(
-        linkedIntegration ? [linkedIntegration] : [],
-      );
+      const systemCredentials = flattenAndNamespaceCredentials(linkedSystem ? [linkedSystem] : []);
       const paginationData = buildPaginationData(step.apiConfig?.pagination);
 
       const sourceData: Record<string, any> = {
-        ...integrationCredentials,
+        ...systemCredentials,
         ...stepInput,
         ...(currentItemObj != null ? { currentItem: currentItemObj } : {}),
         ...paginationData,
       };
 
-      const credentials = extractCredentials(sourceData);
+      const allSystemCredentials = flattenAndNamespaceCredentials(systems);
+      const credentials = {
+        ...extractCredentials(sourceData),
+        ...allSystemCredentials,
+      };
 
       const previousStepResults = buildPreviousStepResults(steps, stepResultsMap, stepIndex - 1);
 
@@ -538,11 +546,11 @@ export function ExecutionProvider({ children }: ExecutionProviderProps) {
       };
 
       const categorizedVariables: CategorizedVariables = {
-        credentials: Object.keys(integrationCredentials),
-        toolInputs: Object.keys(manualPayload),
+        credentials: Object.keys(systemCredentials || {}),
+        toolInputs: Object.keys(manualPayload || {}),
         fileInputs: Object.keys(payload.filePayloads || {}),
         currentStepData: ["currentItem"],
-        previousStepData: Object.keys(previousStepResults),
+        previousStepData: Object.keys(previousStepResults || {}),
         paginationVariables: ["page", "offset", "cursor", "limit", "pageSize"],
       };
 
@@ -563,7 +571,7 @@ export function ExecutionProvider({ children }: ExecutionProviderProps) {
     stepExecutions,
     stepInputs,
     dataSelectorResults,
-    integrations,
+    systems,
     manualPayload,
     payload.filePayloads,
     stepResultsMap,
@@ -610,6 +618,67 @@ export function ExecutionProvider({ children }: ExecutionProviderProps) {
     },
     [dataSelectorResults],
   );
+
+  const getExecutionStateSummary = useCallback((): string => {
+    const lines: string[] = [];
+
+    if (isExecutingAny) {
+      lines.push(
+        `Execution Status: Running (step ${(currentExecutingStepIndex ?? 0) + 1}/${steps.length})`,
+      );
+    } else if (isStopping) {
+      lines.push("Execution Status: Stopping");
+    } else {
+      lines.push("Execution Status: Idle");
+    }
+
+    // Per-step status summary
+    const stepSummaries: string[] = [];
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i];
+      const exec = stepExecutions[step.id];
+      const status = exec?.status ?? "pending";
+      const dsResult = dataSelectorResults[step.id];
+
+      let summary = `Step ${i + 1} (${step.id}): ${status}`;
+
+      if (status === "failed" && exec?.error) {
+        summary += ` - Error: ${exec.error.substring(0, 400)}`;
+      }
+
+      if (
+        dsResult?.error &&
+        (status === "completed" || status === "failed" || status === "running")
+      ) {
+        summary += ` - DataSelector Error: ${dsResult.error.substring(0, 400)}`;
+      }
+
+      stepSummaries.push(summary);
+    }
+
+    if (stepSummaries.length > 0) {
+      lines.push("\nStep Status:");
+      lines.push(...stepSummaries);
+    }
+
+    if (transformStatus !== "idle") {
+      lines.push(`\nFinal Transform: ${transformStatus}`);
+      if (finalError) {
+        lines.push(`Transform Error: ${finalError.substring(0, 200)}`);
+      }
+    }
+
+    return lines.join("\n");
+  }, [
+    isExecutingAny,
+    isStopping,
+    currentExecutingStepIndex,
+    steps,
+    stepExecutions,
+    dataSelectorResults,
+    transformStatus,
+    finalError,
+  ]);
 
   const value = useMemo<ExecutionContextValue>(
     () => ({
@@ -658,6 +727,7 @@ export function ExecutionProvider({ children }: ExecutionProviderProps) {
       getCategorizedVariables,
       getCategorizedSources,
       getDataSelectorResult,
+      getExecutionStateSummary,
     }),
     [
       stepExecutions,
@@ -705,6 +775,7 @@ export function ExecutionProvider({ children }: ExecutionProviderProps) {
       getCategorizedVariables,
       getCategorizedSources,
       getDataSelectorResult,
+      getExecutionStateSummary,
     ],
   );
 

@@ -3,16 +3,25 @@ import type {
   DiscoveryRun,
   FileReference,
   FileStatus,
-  Integration,
+  RequestSource,
   Run,
   RunStatus,
+  System,
   Tool,
 } from "@superglue/shared";
+import jsonpatch from "fast-json-patch";
 import { Pool, PoolConfig } from "pg";
 import { credentialEncryption } from "../utils/encryption.js";
 import { logMessage } from "../utils/logs.js";
-import { extractRun } from "./migrations/run-migration.js";
-import type { DataStore, ToolScheduleInternal } from "./types.js";
+import { extractRun, normalizeTool } from "./migrations/migration.js";
+import type {
+  DataStore,
+  PrometheusRunMetrics,
+  PrometheusRunSourceLabel,
+  PrometheusRunStatusLabel,
+  ToolHistoryEntry,
+  ToolScheduleInternal,
+} from "./types.js";
 
 type ConfigType = "api" | "workflow";
 type ConfigData = ApiConfig | Tool;
@@ -59,11 +68,11 @@ export class PostgresService implements DataStore {
 
     this.initializeTables();
   }
-  async getManyIntegrations(params: {
+  async getManySystems(params: {
     ids: string[];
     includeDocs?: boolean;
     orgId?: string;
-  }): Promise<Integration[]> {
+  }): Promise<System[]> {
     const { ids, includeDocs = true, orgId } = params;
     const client = await this.pool.connect();
     try {
@@ -71,7 +80,7 @@ export class PostgresService implements DataStore {
       if (includeDocs) {
         query = `SELECT i.id, i.name, i.type, i.url_host, i.url_path, i.credentials, 
                         i.documentation_url, i.documentation_pending,
-                        i.open_api_url, i.specific_instructions, i.documentation_keywords, i.icon, i.version, i.created_at, i.updated_at,
+                        i.open_api_url, i.specific_instructions, i.documentation_keywords, i.icon, i.metadata, i.version, i.created_at, i.updated_at,
                         d.documentation, d.open_api_schema
                  FROM integrations i
                  LEFT JOIN integration_details d ON i.id = d.integration_id AND i.org_id = d.org_id
@@ -79,14 +88,14 @@ export class PostgresService implements DataStore {
       } else {
         query = `SELECT id, name, type, url_host, url_path, credentials, 
                         documentation_url, documentation_pending,
-                        open_api_url, specific_instructions, documentation_keywords, icon, version, created_at, updated_at
+                        open_api_url, specific_instructions, documentation_keywords, icon, metadata, version, created_at, updated_at
                  FROM integrations WHERE id = ANY($1) AND org_id = $2`;
       }
 
       const result = await client.query(query, [ids, orgId || ""]);
 
       return result.rows.map((row: any) => {
-        const integration: Integration = {
+        const system: System = {
           id: row.id,
           name: row.name,
           type: row.type,
@@ -101,12 +110,13 @@ export class PostgresService implements DataStore {
           specificInstructions: row.specific_instructions,
           documentationKeywords: row.documentation_keywords,
           icon: row.icon,
+          metadata: row.metadata,
           version: row.version,
           createdAt: row.created_at,
           updatedAt: row.updated_at,
         };
 
-        return integration;
+        return system;
       });
     } finally {
       client.release();
@@ -137,12 +147,66 @@ export class PostgresService implements DataStore {
           id VARCHAR(255) NOT NULL,
           config_id VARCHAR(255),
           org_id VARCHAR(255),
+          status VARCHAR(50),
+          request_source VARCHAR(50) CHECK (request_source IN ('api','frontend','scheduler','mcp','tool-chain','webhook')),
           data JSONB NOT NULL,
           started_at TIMESTAMP,
           completed_at TIMESTAMP,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           PRIMARY KEY (id, org_id)
         )
+      `);
+
+      // Backwards-compatible schema updates for existing deployments
+      await client.query(`ALTER TABLE runs ADD COLUMN IF NOT EXISTS status VARCHAR(50)`);
+      await client.query(`ALTER TABLE runs ADD COLUMN IF NOT EXISTS request_source VARCHAR(50)`);
+
+      // Ensure request_source is constrained to allowed enum values (idempotent)
+      await client.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'runs_request_source_check'
+          ) THEN
+            ALTER TABLE runs
+              ADD CONSTRAINT runs_request_source_check
+              CHECK (request_source IN ('api','frontend','scheduler','mcp','tool-chain','webhook'));
+          END IF;
+        END
+        $$;
+      `);
+
+      // Backfill columns from JSON for existing rows
+      // - New format: data.status = RUNNING|SUCCESS|FAILED|ABORTED
+      // - Legacy format: data.success = true|false (no status field)
+      await client.query(`
+        UPDATE runs
+        SET
+          status = COALESCE(
+            status,
+            NULLIF(data->>'status', ''),
+            CASE
+              WHEN data->>'success' = 'true' THEN 'SUCCESS'
+              WHEN data->>'success' = 'false' THEN 'FAILED'
+              ELSE NULL
+            END
+          ),
+          request_source = COALESCE(
+            request_source,
+            CASE
+              WHEN data->>'requestSource' = 'scheduler' THEN 'scheduler'
+              WHEN data->>'requestSource' = 'scheduled' THEN 'scheduler'
+              WHEN data->>'requestSource' = 'frontend' THEN 'frontend'
+              WHEN data->>'requestSource' = 'mcp' THEN 'mcp'
+              WHEN data->>'requestSource' = 'rest_api' THEN 'api'
+              WHEN data->>'requestSource' = 'api' THEN 'api'
+              WHEN data->>'requestSource' = 'tool-chain' THEN 'tool-chain'
+              WHEN data->>'requestSource' IN ('api-chain', 'api_chain') THEN 'tool-chain'
+              WHEN data->>'requestSource' = 'webhook' THEN 'webhook'
+              ELSE 'frontend'
+            END
+          )
+        WHERE status IS NULL OR request_source IS NULL
       `);
 
       // Integrations table (without large fields)
@@ -161,6 +225,7 @@ export class PostgresService implements DataStore {
       specific_instructions TEXT,
       documentation_keywords TEXT[],
       icon VARCHAR(255),
+      metadata JSONB,
       version VARCHAR(50),
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -179,6 +244,13 @@ export class PostgresService implements DataStore {
       FOREIGN KEY (integration_id, org_id) REFERENCES integrations(id, org_id) ON DELETE CASCADE
     )
   `);
+
+      // Backwards-compatible schema updates for integrations table
+      await client.query(`ALTER TABLE integrations ADD COLUMN IF NOT EXISTS metadata JSONB`);
+      await client.query(
+        `ALTER TABLE integrations ADD COLUMN IF NOT EXISTS template_name VARCHAR(255)`,
+      );
+
       // Integration templates table for Superglue OAuth credentials (and potentially further fields in the future)
       await client.query(`
     CREATE TABLE IF NOT EXISTS integration_templates (
@@ -260,6 +332,21 @@ export class PostgresService implements DataStore {
                 )
             `);
 
+      // Tool version history table (stores previous versions on each save)
+      await client.query(`
+                CREATE TABLE IF NOT EXISTS tool_history (
+                    id SERIAL PRIMARY KEY,
+                    tool_id VARCHAR(255) NOT NULL,
+                    org_id VARCHAR(255) NOT NULL,
+                    version INTEGER NOT NULL,
+                    data JSONB NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    created_by_user_id VARCHAR(255),
+                    created_by_email VARCHAR(255),
+                    UNIQUE(tool_id, org_id, version)
+                )
+            `);
+
       await client.query(
         `CREATE INDEX IF NOT EXISTS idx_configurations_type_org ON configurations(type, org_id)`,
       );
@@ -273,6 +360,12 @@ export class PostgresService implements DataStore {
         `CREATE INDEX IF NOT EXISTS idx_runs_config_id ON runs(config_id, org_id)`,
       );
       await client.query(`CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at)`);
+      await client.query(
+        `CREATE INDEX IF NOT EXISTS idx_runs_org_status_source ON runs(org_id, status, request_source)`,
+      );
+      await client.query(
+        `CREATE INDEX IF NOT EXISTS idx_runs_org_source_completed_at ON runs(org_id, request_source, completed_at) WHERE completed_at IS NOT NULL`,
+      );
       await client.query(
         `CREATE INDEX IF NOT EXISTS idx_integrations_type ON integrations(type, org_id)`,
       );
@@ -296,6 +389,9 @@ export class PostgresService implements DataStore {
       );
       await client.query(
         `CREATE INDEX IF NOT EXISTS idx_file_references_org_status ON file_references(org_id, status)`,
+      );
+      await client.query(
+        `CREATE INDEX IF NOT EXISTS idx_tool_history_lookup ON tool_history(tool_id, org_id, version DESC)`,
       );
     } finally {
       client.release();
@@ -453,18 +549,21 @@ export class PostgresService implements DataStore {
     const client = await this.pool.connect();
     try {
       const result = await client.query(
-        "SELECT id, config_id, data, started_at, completed_at FROM runs WHERE id = $1 AND org_id = $2",
+        "SELECT id, config_id, data, started_at, completed_at, request_source FROM runs WHERE id = $1 AND org_id = $2",
         [id, orgId || ""],
       );
       if (!result.rows[0]) return null;
 
       const row = result.rows[0];
-      return extractRun(row.data, {
+      const run = extractRun(row.data, {
         id: row.id,
         config_id: row.config_id,
         started_at: row.started_at,
         completed_at: row.completed_at,
       });
+      // Source of truth for requestSource is the column, not the JSON
+      run.requestSource = row.request_source || run.requestSource;
+      return run;
     } finally {
       client.release();
     }
@@ -475,19 +574,20 @@ export class PostgresService implements DataStore {
     offset?: number;
     configId?: string;
     status?: RunStatus;
+    requestSources?: RequestSource[];
     orgId?: string;
   }): Promise<{ items: Run[]; total: number }> {
-    const { limit = 10, offset = 0, configId, status, orgId } = params || {};
+    const { limit = 10, offset = 0, configId, status, requestSources, orgId } = params || {};
     const client = await this.pool.connect();
     try {
       let selectQuery = `
                 SELECT 
-                    id, config_id, data, started_at, completed_at,
+                    id, config_id, data, started_at, completed_at, request_source,
                     COUNT(*) OVER() as total_count
-                FROM runs 
+                FROM runs
                 WHERE org_id = $1
             `;
-      const queryParams: string[] = [orgId || ""];
+      const queryParams: (string | string[])[] = [orgId || ""];
 
       if (configId) {
         selectQuery += " AND config_id = $2";
@@ -498,6 +598,12 @@ export class PostgresService implements DataStore {
         const paramIndex = queryParams.length + 1;
         selectQuery += ` AND data->>'status' = $${paramIndex}`;
         queryParams.push(status);
+      }
+
+      if (requestSources !== undefined && requestSources.length > 0) {
+        const paramIndex = queryParams.length + 1;
+        selectQuery += ` AND request_source = ANY($${paramIndex})`;
+        queryParams.push(requestSources);
       }
 
       selectQuery +=
@@ -511,14 +617,17 @@ export class PostgresService implements DataStore {
 
       const total = result.rows.length > 0 ? parseInt(result.rows[0].total_count) : 0;
 
-      const items = result.rows.map((row) =>
-        extractRun(row.data, {
+      const items = result.rows.map((row) => {
+        const run = extractRun(row.data, {
           id: row.id,
           config_id: row.config_id,
           started_at: row.started_at,
           completed_at: row.completed_at,
-        }),
-      );
+        });
+        // Source of truth for requestSource is the column, not the JSON
+        run.requestSource = row.request_source || run.requestSource;
+        return run;
+      });
 
       return { items, total };
     } finally {
@@ -526,29 +635,31 @@ export class PostgresService implements DataStore {
     }
   }
 
-  async createRun(params: { run: Run }): Promise<Run> {
-    const { run } = params;
+  async createRun(params: { run: Run; orgId?: string }): Promise<Run> {
+    const { run, orgId = "" } = params;
     if (!run) throw new Error("Run is required");
     const client = await this.pool.connect();
     try {
       const result = await client.query(
         `
-                INSERT INTO runs (id, config_id, org_id, data, started_at, completed_at) 
-                VALUES ($1, $2, $3, $4, $5, $6)
+                INSERT INTO runs (id, config_id, org_id, status, request_source, data, started_at, completed_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 ON CONFLICT (id, org_id) DO NOTHING
             `,
         [
-          run.id,
+          run.runId,
           run.toolId,
-          run.orgId || "",
+          orgId,
+          run.status,
+          run.requestSource ?? "api",
           JSON.stringify(run),
-          run.startedAt ? run.startedAt.toISOString() : null,
-          run.completedAt ? run.completedAt.toISOString() : null,
+          run.metadata.startedAt,
+          run.metadata.completedAt ?? null,
         ],
       );
 
       if (result.rowCount === 0) {
-        throw new Error(`Run with id ${run.id} already exists`);
+        throw new Error(`Run with id ${run.runId} already exists`);
       }
 
       return run;
@@ -562,7 +673,7 @@ export class PostgresService implements DataStore {
     const client = await this.pool.connect();
     try {
       const existingResult = await client.query(
-        "SELECT id, config_id, data, started_at, completed_at FROM runs WHERE id = $1 AND org_id = $2",
+        "SELECT id, config_id, data, started_at, completed_at, request_source FROM runs WHERE id = $1 AND org_id = $2",
         [id, orgId],
       );
 
@@ -577,24 +688,30 @@ export class PostgresService implements DataStore {
         started_at: row.started_at,
         completed_at: row.completed_at,
       });
+      // Source of truth for requestSource is the column, not the JSON
+      existingRun.requestSource = row.request_source || existingRun.requestSource;
 
       const updatedRun: Run = {
         ...existingRun,
         ...updates,
-        id,
-        orgId,
-        startedAt: existingRun.startedAt,
+        runId: id,
+        metadata: {
+          ...existingRun.metadata,
+          ...updates.metadata,
+        },
       };
 
       await client.query(
         `
                 UPDATE runs 
-                SET data = $1, completed_at = $2
-                WHERE id = $3 AND org_id = $4
+                SET data = $1, completed_at = $2, status = $3, request_source = $4
+                WHERE id = $5 AND org_id = $6
             `,
         [
           JSON.stringify(updatedRun),
-          updatedRun.completedAt ? updatedRun.completedAt.toISOString() : null,
+          updatedRun.metadata.completedAt ?? null,
+          updatedRun.status,
+          updatedRun.requestSource ?? "api",
           id,
           orgId,
         ],
@@ -606,9 +723,77 @@ export class PostgresService implements DataStore {
     }
   }
 
+  async getPrometheusRunMetrics(params: {
+    orgId: string;
+    windowSeconds: number;
+  }): Promise<PrometheusRunMetrics> {
+    const { orgId, windowSeconds } = params;
+    const client = await this.pool.connect();
+    try {
+      const totals = await client.query(
+        `
+          SELECT
+            status,
+            request_source,
+            COUNT(*)::bigint AS count
+          FROM runs
+          WHERE org_id = $1
+            AND status IN ('SUCCESS', 'FAILED', 'ABORTED')
+          GROUP BY status, request_source
+        `,
+        [orgId],
+      );
+
+      const validSources = ["api", "frontend", "scheduler", "mcp", "tool-chain", "webhook"];
+      const runsTotal: PrometheusRunMetrics["runsTotal"] = totals.rows
+        .map((r: any) => {
+          const status = String(r.status || "").toLowerCase() as PrometheusRunStatusLabel;
+          const source = String(r.request_source || "api") as PrometheusRunSourceLabel;
+          const value = Number(r.count ?? 0);
+          if (status !== "success" && status !== "failed" && status !== "aborted") return null;
+          if (!validSources.includes(source)) return null;
+          return { status, source, value };
+        })
+        .filter(Boolean) as PrometheusRunMetrics["runsTotal"];
+
+      const p95Rows = await client.query(
+        `
+          SELECT
+            request_source,
+            percentile_cont(0.95) WITHIN GROUP (
+              ORDER BY EXTRACT(EPOCH FROM (completed_at - started_at))
+            ) AS p95
+          FROM runs
+          WHERE org_id = $1
+            AND completed_at IS NOT NULL
+            AND started_at IS NOT NULL
+            AND status IN ('SUCCESS', 'FAILED', 'ABORTED')
+            AND completed_at > (NOW() - make_interval(secs => $2))
+          GROUP BY request_source
+        `,
+        [orgId, windowSeconds],
+      );
+
+      const runDurationSecondsP95: PrometheusRunMetrics["runDurationSecondsP95"] = p95Rows.rows
+        .map((r: any) => {
+          const source = String(r.request_source || "api") as PrometheusRunSourceLabel;
+          const value = Number(r.p95);
+          if (!Number.isFinite(value)) return null;
+          if (!validSources.includes(source)) return null;
+          return { source, windowSeconds, value };
+        })
+        .filter(Boolean) as PrometheusRunMetrics["runDurationSecondsP95"];
+
+      return { runsTotal, runDurationSecondsP95 };
+    } finally {
+      client.release();
+    }
+  }
+
   async getWorkflow(params: { id: string; orgId?: string }): Promise<Tool | null> {
     const { id, orgId } = params;
-    return this.getConfig<Tool>(id, "workflow", orgId);
+    const workflow = await this.getConfig<Tool>(id, "workflow", orgId);
+    return workflow ? normalizeTool(workflow) : null;
   }
 
   async listWorkflows(params?: {
@@ -617,13 +802,79 @@ export class PostgresService implements DataStore {
     orgId?: string;
   }): Promise<{ items: Tool[]; total: number }> {
     const { limit = 10, offset = 0, orgId } = params || {};
-    return this.listConfigs<Tool>("workflow", limit, offset, orgId);
+    const result = await this.listConfigs<Tool>("workflow", limit, offset, orgId);
+    return { items: result.items.map(normalizeTool), total: result.total };
   }
 
-  async upsertWorkflow(params: { id: string; workflow: Tool; orgId?: string }): Promise<Tool> {
-    const { id, workflow, orgId } = params;
-    const integrationIds: string[] = [];
-    return this.upsertConfig(id, workflow, "workflow", orgId, integrationIds);
+  async upsertWorkflow(params: {
+    id: string;
+    workflow: Tool;
+    orgId?: string;
+    userId?: string;
+    userEmail?: string;
+  }): Promise<Tool> {
+    const { id, workflow, orgId = "", userId, userEmail } = params;
+    if (!id || !workflow) return null;
+
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      // Check if tool already exists - if so, archive current version
+      const existingResult = await client.query(
+        "SELECT data FROM configurations WHERE id = $1 AND type = $2 AND org_id = $3",
+        [id, "workflow", orgId],
+      );
+
+      if (existingResult.rows.length > 0) {
+        const existingTool = existingResult.rows[0].data as Tool;
+
+        const { updatedAt: _u1, createdAt: _c1, ...existingRest } = existingTool as any;
+        const { updatedAt: _u2, createdAt: _c2, ...workflowRest } = workflow as any;
+        const hasChanges = jsonpatch.compare(existingRest, workflowRest).length > 0;
+
+        if (hasChanges) {
+          // Get next version number
+          const versionResult = await client.query(
+            "SELECT COALESCE(MAX(version), 0) + 1 as next_version FROM tool_history WHERE tool_id = $1 AND org_id = $2",
+            [id, orgId],
+          );
+          const nextVersion = versionResult.rows[0].next_version;
+
+          // Archive the existing version (normalized to ensure consistent format)
+          await client.query(
+            `INSERT INTO tool_history (tool_id, org_id, version, data, created_by_user_id, created_by_email)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [
+              id,
+              orgId,
+              nextVersion,
+              JSON.stringify(normalizeTool(existingTool)),
+              userId || null,
+              userEmail || null,
+            ],
+          );
+        }
+      }
+
+      // Now upsert the new version
+      const version = this.extractVersion(workflow);
+      await client.query(
+        `INSERT INTO configurations (id, org_id, type, version, data, integration_ids, updated_at) 
+         VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
+         ON CONFLICT (id, type, org_id) 
+         DO UPDATE SET data = $5, version = $4, integration_ids = $6, updated_at = CURRENT_TIMESTAMP`,
+        [id, orgId, "workflow", version, JSON.stringify(workflow), []],
+      );
+
+      await client.query("COMMIT");
+      return { ...workflow, id };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async deleteWorkflow(params: { id: string; orgId?: string }): Promise<boolean> {
@@ -692,7 +943,13 @@ export class PostgresService implements DataStore {
         [newId, oldId, orgId],
       );
 
-      // 5. Delete old workflow
+      // 5. Migrate tool_history to new tool_id
+      await client.query(
+        `UPDATE tool_history SET tool_id = $1 WHERE tool_id = $2 AND org_id = $3`,
+        [newId, oldId, orgId],
+      );
+
+      // 6. Delete old workflow
       await client.query("DELETE FROM configurations WHERE id = $1 AND type = $2 AND org_id = $3", [
         oldId,
         "workflow",
@@ -709,9 +966,108 @@ export class PostgresService implements DataStore {
     }
   }
 
-  // Workflow Schedule Methods
-  async listWorkflowSchedules(params: {
-    workflowId?: string;
+  // Tool History Methods
+  async listToolHistory(params: { toolId: string; orgId?: string }): Promise<ToolHistoryEntry[]> {
+    const { toolId, orgId = "" } = params;
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query(
+        `SELECT version, data, created_at, created_by_user_id, created_by_email
+         FROM tool_history
+         WHERE tool_id = $1 AND org_id = $2
+         ORDER BY version DESC`,
+        [toolId, orgId],
+      );
+
+      return result.rows.map((row) => ({
+        version: row.version,
+        createdAt: row.created_at,
+        createdByUserId: row.created_by_user_id || undefined,
+        createdByEmail: row.created_by_email || undefined,
+        tool: row.data as Tool,
+      }));
+    } finally {
+      client.release();
+    }
+  }
+
+  async restoreToolVersion(params: {
+    toolId: string;
+    version: number;
+    orgId?: string;
+    userId?: string;
+    userEmail?: string;
+  }): Promise<Tool> {
+    const { toolId, version, orgId = "", userId, userEmail } = params;
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      // Get the archived version to restore
+      const archiveResult = await client.query(
+        `SELECT data FROM tool_history WHERE tool_id = $1 AND org_id = $2 AND version = $3`,
+        [toolId, orgId, version],
+      );
+
+      if (archiveResult.rows.length === 0) {
+        await client.query("ROLLBACK");
+        throw new Error(`Version ${version} not found for tool ${toolId}`);
+      }
+
+      const toolToRestore = archiveResult.rows[0].data as Tool;
+
+      // Get current tool to archive it first
+      const currentResult = await client.query(
+        `SELECT data FROM configurations WHERE id = $1 AND org_id = $2 AND type = 'workflow'`,
+        [toolId, orgId],
+      );
+
+      if (currentResult.rows.length > 0) {
+        const currentTool = currentResult.rows[0].data as Tool;
+
+        // Always archive the current version before restore
+        const versionResult = await client.query(
+          "SELECT COALESCE(MAX(version), 0) + 1 as next_version FROM tool_history WHERE tool_id = $1 AND org_id = $2",
+          [toolId, orgId],
+        );
+        const nextVersion = versionResult.rows[0].next_version;
+
+        await client.query(
+          `INSERT INTO tool_history (tool_id, org_id, version, data, created_by_user_id, created_by_email)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [
+            toolId,
+            orgId,
+            nextVersion,
+            JSON.stringify(currentTool),
+            userId || null,
+            userEmail || null,
+          ],
+        );
+      }
+
+      // Save the restored version (override id to match current tool's primary key)
+      const restoredWorkflow = { ...toolToRestore, id: toolId, updatedAt: new Date() };
+      const toolVersion = this.extractVersion(restoredWorkflow);
+      await client.query(
+        `UPDATE configurations SET data = $1, version = $2, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $3 AND org_id = $4 AND type = 'workflow'`,
+        [JSON.stringify(restoredWorkflow), toolVersion, toolId, orgId],
+      );
+
+      await client.query("COMMIT");
+      return restoredWorkflow;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  // Tool Schedule Methods
+  async listToolSchedules(params: {
+    toolId?: string;
     orgId: string;
   }): Promise<ToolScheduleInternal[]> {
     const client = await this.pool.connect();
@@ -720,10 +1076,10 @@ export class PostgresService implements DataStore {
       let query: string;
       let queryParams: string[];
 
-      if (params.workflowId) {
+      if (params.toolId) {
         query =
           "SELECT id, org_id, workflow_id, cron_expression, timezone, enabled, payload, options, last_run_at, next_run_at, created_at, updated_at FROM workflow_schedules WHERE workflow_id = $1 AND org_id = $2";
-        queryParams = [params.workflowId, params.orgId];
+        queryParams = [params.toolId, params.orgId];
       } else {
         query =
           "SELECT id, org_id, workflow_id, cron_expression, timezone, enabled, payload, options, last_run_at, next_run_at, created_at, updated_at FROM workflow_schedules WHERE org_id = $1";
@@ -731,13 +1087,13 @@ export class PostgresService implements DataStore {
       }
 
       const queryResult = await client.query(query, queryParams);
-      return queryResult.rows.map(this.mapWorkflowSchedule);
+      return queryResult.rows.map(this.mapToolSchedule);
     } finally {
       client.release();
     }
   }
 
-  async getWorkflowSchedule({
+  async getToolSchedule({
     id,
     orgId,
   }: {
@@ -754,13 +1110,13 @@ export class PostgresService implements DataStore {
         return null;
       }
 
-      return this.mapWorkflowSchedule(queryResult.rows[0]);
+      return this.mapToolSchedule(queryResult.rows[0]);
     } finally {
       client.release();
     }
   }
 
-  async upsertWorkflowSchedule({ schedule }: { schedule: ToolScheduleInternal }): Promise<void> {
+  async upsertToolSchedule({ schedule }: { schedule: ToolScheduleInternal }): Promise<void> {
     const client = await this.pool.connect();
     try {
       const query = `
@@ -781,7 +1137,7 @@ export class PostgresService implements DataStore {
       await client.query(query, [
         schedule.id,
         schedule.orgId,
-        schedule.workflowId,
+        schedule.toolId,
         "workflow",
         schedule.cronExpression,
         schedule.timezone,
@@ -796,7 +1152,7 @@ export class PostgresService implements DataStore {
     }
   }
 
-  async deleteWorkflowSchedule({ id, orgId }: { id: string; orgId: string }): Promise<boolean> {
+  async deleteToolSchedule({ id, orgId }: { id: string; orgId: string }): Promise<boolean> {
     const client = await this.pool.connect();
     try {
       const result = await client.query(
@@ -809,7 +1165,7 @@ export class PostgresService implements DataStore {
     }
   }
 
-  async listDueWorkflowSchedules(): Promise<ToolScheduleInternal[]> {
+  async listDueToolSchedules(): Promise<ToolScheduleInternal[]> {
     const client = await this.pool.connect();
 
     // We check for schedules that are enabled and have a next run time that is in the past (all timestamps in the database are in UTC)
@@ -817,7 +1173,7 @@ export class PostgresService implements DataStore {
       const query = `SELECT id, org_id, workflow_id, cron_expression, timezone, enabled, payload, options, last_run_at, next_run_at, created_at, updated_at FROM workflow_schedules WHERE enabled = true AND next_run_at <= CURRENT_TIMESTAMP at time zone 'utc'`;
       const queryResult = await client.query(query);
 
-      return queryResult.rows.map(this.mapWorkflowSchedule);
+      return queryResult.rows.map(this.mapToolSchedule);
     } finally {
       client.release();
     }
@@ -843,10 +1199,10 @@ export class PostgresService implements DataStore {
     }
   }
 
-  private mapWorkflowSchedule(row: any): ToolScheduleInternal {
+  private mapToolSchedule(row: any): ToolScheduleInternal {
     return {
       id: row.id,
-      workflowId: row.workflow_id,
+      toolId: row.workflow_id,
       orgId: row.org_id,
       cronExpression: row.cron_expression,
       timezone: row.timezone,
@@ -860,12 +1216,12 @@ export class PostgresService implements DataStore {
     };
   }
 
-  // Integration Methods
-  async getIntegration(params: {
+  // System Methods
+  async getSystem(params: {
     id: string;
     includeDocs?: boolean;
     orgId?: string;
-  }): Promise<Integration | null> {
+  }): Promise<System | null> {
     const { id, includeDocs = true, orgId } = params;
     if (!id) return null;
     const client = await this.pool.connect();
@@ -874,7 +1230,7 @@ export class PostgresService implements DataStore {
       if (includeDocs) {
         query = `SELECT i.id, i.name, i.type, i.url_host, i.url_path, i.credentials, 
                         i.documentation_url, i.documentation_pending,
-                        i.open_api_url, i.specific_instructions, i.documentation_keywords, i.icon, i.version, i.created_at, i.updated_at,
+                        i.open_api_url, i.specific_instructions, i.documentation_keywords, i.icon, i.metadata, i.template_name, i.version, i.created_at, i.updated_at,
                         d.documentation, d.open_api_schema
                  FROM integrations i
                  LEFT JOIN integration_details d ON i.id = d.integration_id AND i.org_id = d.org_id
@@ -882,7 +1238,7 @@ export class PostgresService implements DataStore {
       } else {
         query = `SELECT id, name, type, url_host, url_path, credentials, 
                         documentation_url, documentation_pending,
-                        open_api_url, specific_instructions, documentation_keywords, icon, version, created_at, updated_at
+                        open_api_url, specific_instructions, documentation_keywords, icon, metadata, template_name, version, created_at, updated_at
                  FROM integrations WHERE id = $1 AND org_id = $2`;
       }
 
@@ -890,7 +1246,7 @@ export class PostgresService implements DataStore {
       if (!result.rows[0]) return null;
 
       const row = result.rows[0] as any;
-      const integration: Integration = {
+      const system: System = {
         id: row.id,
         name: row.name,
         type: row.type,
@@ -905,23 +1261,25 @@ export class PostgresService implements DataStore {
         specificInstructions: row.specific_instructions,
         documentationKeywords: row.documentation_keywords,
         icon: row.icon,
+        metadata: row.metadata,
+        templateName: row.template_name,
         version: row.version,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
       };
 
-      return integration;
+      return system;
     } finally {
       client.release();
     }
   }
 
-  async listIntegrations(params?: {
+  async listSystems(params?: {
     limit?: number;
     offset?: number;
     includeDocs?: boolean;
     orgId?: string;
-  }): Promise<{ items: Integration[]; total: number }> {
+  }): Promise<{ items: System[]; total: number }> {
     const { limit = 10, offset = 0, includeDocs = false, orgId } = params || {};
     const client = await this.pool.connect();
     try {
@@ -935,7 +1293,7 @@ export class PostgresService implements DataStore {
       if (includeDocs) {
         query = `SELECT i.id, i.name, i.type, i.url_host, i.url_path, i.credentials, 
                         i.documentation_url, i.documentation_pending,
-                        i.open_api_url, i.specific_instructions, i.documentation_keywords, i.icon, i.version, i.created_at, i.updated_at,
+                        i.open_api_url, i.specific_instructions, i.documentation_keywords, i.icon, i.metadata, i.template_name, i.version, i.created_at, i.updated_at,
                         d.documentation, d.open_api_schema
                  FROM integrations i
                  LEFT JOIN integration_details d ON i.id = d.integration_id AND i.org_id = d.org_id
@@ -944,7 +1302,7 @@ export class PostgresService implements DataStore {
       } else {
         query = `SELECT id, name, type, url_host, url_path, credentials, 
                         documentation_url, documentation_pending,
-                        open_api_url, specific_instructions, documentation_keywords, icon, version, created_at, updated_at
+                        open_api_url, specific_instructions, documentation_keywords, icon, metadata, template_name, version, created_at, updated_at
                  FROM integrations WHERE org_id = $1 
                  ORDER BY created_at DESC LIMIT $2 OFFSET $3`;
       }
@@ -952,7 +1310,7 @@ export class PostgresService implements DataStore {
       const result = await client.query(query, [orgId || "", limit, offset]);
 
       const items = result.rows.map((row: any) => {
-        const integration: Integration = {
+        const system: System = {
           id: row.id,
           name: row.name,
           type: row.type,
@@ -967,12 +1325,14 @@ export class PostgresService implements DataStore {
           specificInstructions: row.specific_instructions,
           documentationKeywords: row.documentation_keywords,
           icon: row.icon,
+          metadata: row.metadata,
+          templateName: row.template_name,
           version: row.version,
           createdAt: row.created_at,
           updatedAt: row.updated_at,
         };
 
-        return integration;
+        return system;
       });
       return { items, total };
     } finally {
@@ -980,31 +1340,27 @@ export class PostgresService implements DataStore {
     }
   }
 
-  async upsertIntegration(params: {
-    id: string;
-    integration: Integration;
-    orgId?: string;
-  }): Promise<Integration> {
-    const { id, integration, orgId } = params;
-    if (!id || !integration) return null;
+  async upsertSystem(params: { id: string; system: System; orgId?: string }): Promise<System> {
+    const { id, system, orgId } = params;
+    if (!id || !system) return null;
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
 
       // Encrypt credentials if provided
-      const encryptedCredentials = integration.credentials
-        ? credentialEncryption.encrypt(integration.credentials)
+      const encryptedCredentials = system.credentials
+        ? credentialEncryption.encrypt(system.credentials)
         : null;
 
-      // Insert/update main integration record
+      // Insert/update main system record (uses integrations table)
       await client.query(
         `
         INSERT INTO integrations (
             id, org_id, name, type, url_host, url_path, credentials,
             documentation_url, documentation_pending,
-            open_api_url, specific_instructions, documentation_keywords, icon, version, created_at, updated_at
+            open_api_url, specific_instructions, documentation_keywords, icon, metadata, template_name, version, created_at, updated_at
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
         )
         ON CONFLICT (id, org_id) 
         DO UPDATE SET 
@@ -1019,31 +1375,35 @@ export class PostgresService implements DataStore {
             specific_instructions = $11,
             documentation_keywords = $12,
             icon = $13,
-            version = $14,
-            updated_at = $16
+            metadata = $14,
+            template_name = $15,
+            version = $16,
+            updated_at = $18
       `,
         [
           id,
           orgId || "",
-          integration.name,
-          integration.type,
-          integration.urlHost,
-          integration.urlPath,
+          system.name,
+          system.type,
+          system.urlHost,
+          system.urlPath,
           encryptedCredentials,
-          integration.documentationUrl,
-          integration.documentationPending,
-          integration.openApiUrl,
-          integration.specificInstructions,
-          integration.documentationKeywords,
-          integration.icon,
-          integration.version,
-          integration.createdAt || new Date(),
-          integration.updatedAt || new Date(),
+          system.documentationUrl,
+          system.documentationPending,
+          system.openApiUrl,
+          system.specificInstructions,
+          system.documentationKeywords,
+          system.icon,
+          system.metadata ? JSON.stringify(system.metadata) : null,
+          system.templateName,
+          system.version,
+          system.createdAt || new Date(),
+          system.updatedAt || new Date(),
         ],
       );
 
       // Insert/update details if any large fields are provided
-      if (integration.documentation || integration.openApiSchema) {
+      if (system.documentation || system.openApiSchema) {
         await client.query(
           `
             INSERT INTO integration_details (
@@ -1054,12 +1414,12 @@ export class PostgresService implements DataStore {
                 documentation = COALESCE($3, integration_details.documentation),
                 open_api_schema = COALESCE($4, integration_details.open_api_schema)
           `,
-          [id, orgId || "", integration.documentation, integration.openApiSchema],
+          [id, orgId || "", system.documentation, system.openApiSchema],
         );
       }
 
       await client.query("COMMIT");
-      return { ...integration, id };
+      return { ...system, id };
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;
@@ -1068,7 +1428,7 @@ export class PostgresService implements DataStore {
     }
   }
 
-  async deleteIntegration(params: { id: string; orgId?: string }): Promise<boolean> {
+  async deleteSystem(params: { id: string; orgId?: string }): Promise<boolean> {
     const { id, orgId } = params;
     if (!id) return false;
     const client = await this.pool.connect();
@@ -1079,7 +1439,7 @@ export class PostgresService implements DataStore {
         [id, orgId || ""],
       );
 
-      // Then delete the integration
+      // Then delete the system (from integrations table)
       const result = await client.query("DELETE FROM integrations WHERE id = $1 AND org_id = $2", [
         id,
         orgId || "",
@@ -1090,19 +1450,19 @@ export class PostgresService implements DataStore {
     }
   }
 
-  async copyTemplateDocumentationToUserIntegration(params: {
+  async copyTemplateDocumentationToUserSystem(params: {
     templateId: string;
-    userIntegrationId: string;
+    userSystemId: string;
     orgId?: string;
   }): Promise<boolean> {
-    const { templateId, userIntegrationId, orgId } = params;
-    if (!templateId || !userIntegrationId) return false;
+    const { templateId, userSystemId, orgId } = params;
+    if (!templateId || !userSystemId) return false;
     const client = await this.pool.connect();
     try {
-      // Copy the template documentation (identified by the org_id == 'template') to the user integration
+      // Copy the template documentation (identified by the org_id == 'template') to the user system
       const result = await client.query(
         "INSERT INTO integration_details (integration_id, org_id, documentation, open_api_schema) SELECT $1::text, $2::text, documentation, open_api_schema FROM integration_details WHERE integration_id = $3 AND org_id = $4",
-        [userIntegrationId, orgId || "", templateId, "template"],
+        [userSystemId, orgId || "", templateId, "template"],
       );
       // return true, if we inserted at least one row
       return result.rowCount > 0;
@@ -1169,6 +1529,7 @@ export class PostgresService implements DataStore {
       await client.query(`DELETE FROM workflow_schedules ${condition}`, param);
       await client.query(`DELETE FROM integration_details ${condition}`, param); // Delete details first
       await client.query(`DELETE FROM integrations ${condition}`, param);
+      await client.query(`DELETE FROM tool_history ${condition}`, param);
     } finally {
       client.release();
     }

@@ -1,14 +1,14 @@
 "use client";
 import { useConfig } from "@/src/app/config-context";
-import { useIntegrations } from "@/src/app/integrations-context";
+import { useSystems } from "@/src/app/systems-context";
 import { useTools } from "@/src/app/tools-context";
 import { createSuperglueClient } from "@/src/lib/client-utils";
 import { type UploadedFileInfo } from "@/src/lib/file-utils";
-import { buildStepInput, isAbortError } from "@/src/lib/general-utils";
+import { buildStepInput } from "@/src/lib/general-utils";
 import {
   ExecutionStep,
   generateDefaultFromSchema,
-  Integration,
+  System,
   Tool,
   ToolResult,
 } from "@superglue/shared";
@@ -18,7 +18,7 @@ import { useToolExecution } from "./hooks/use-tool-execution";
 import { useToolData } from "./hooks/use-tool-data";
 import { ToolConfigProvider, useToolConfig, ExecutionProvider, useExecution } from "./context";
 import { useToast } from "@/src/hooks/use-toast";
-import { ArchiveRestore, Check, Hammer, Loader2, Play, Square, X } from "lucide-react";
+import { ArchiveRestore, Check, Loader2, Play, Square, X } from "lucide-react";
 import { useRouter } from "next/navigation";
 import {
   forwardRef,
@@ -29,6 +29,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -41,13 +42,11 @@ import {
 } from "../ui/alert-dialog";
 import { Button } from "../ui/button";
 import { DeployButton } from "./deploy/DeployButton";
-import { FixStepDialog } from "./dialogs/FixStepDialog";
-import { FixTransformDialog } from "./dialogs/FixTransformDialog";
 import { ModifyStepConfirmDialog } from "./dialogs/ModifyStepConfirmDialog";
 import { FolderPicker } from "./folders/FolderPicker";
 import { ToolActionsMenu } from "./ToolActionsMenu";
-import { ToolBuilder, type BuildContext } from "./ToolBuilder";
 import { ToolStepGallery } from "./ToolStepGallery";
+import { useRightSidebar } from "@/src/components/sidebar/RightSidebarContext";
 
 export interface ToolPlaygroundProps {
   id?: string;
@@ -55,7 +54,7 @@ export interface ToolPlaygroundProps {
   initialTool?: Tool;
   initialPayload?: string;
   initialInstruction?: string;
-  integrations?: Integration[];
+  systems?: System[];
   onSave?: (tool: Tool, payload: Record<string, any>) => Promise<void>;
   onExecute?: (tool: Tool, result: ToolResult) => void;
   onInstructionEdit?: () => void;
@@ -64,21 +63,20 @@ export interface ToolPlaygroundProps {
   shouldStopExecution?: boolean;
   onStopExecution?: () => void;
   uploadedFiles?: UploadedFileInfo[];
+  filePayloads?: Record<string, any>;
   onFilesUpload?: (files: File[]) => Promise<void>;
   onFileRemove?: (key: string) => void;
   isProcessingFiles?: boolean;
   totalFileSize?: number;
   onFilesChange?: (files: UploadedFileInfo[], payloads: Record<string, any>) => void;
-  hideRebuildButton?: boolean;
-  onRebuildStart?: () => void;
-  onRebuildEnd?: () => void;
+  renderAgentInline?: boolean;
+  initialError?: string;
 }
 
 export interface ToolPlaygroundHandle {
   executeTool: () => Promise<void>;
   saveTool: () => Promise<boolean>;
   getCurrentTool: () => Tool;
-  closeRebuild: () => void;
 }
 
 interface ToolPlaygroundInnerProps extends ToolPlaygroundProps {
@@ -103,9 +101,8 @@ function ToolPlaygroundInner({
   isProcessingFiles: parentIsProcessingFiles,
   totalFileSize: parentTotalFileSize,
   onFilesChange: parentOnFilesChange,
-  hideRebuildButton = false,
-  onRebuildStart,
-  onRebuildEnd,
+  renderAgentInline = false,
+  initialError,
   innerRef,
 }: ToolPlaygroundInnerProps) {
   const router = useRouter();
@@ -127,6 +124,7 @@ function ToolPlaygroundInner({
     setPayloadText,
     setUploadedFiles: setContextUploadedFiles,
     setFilePayloads: setContextFilePayloads,
+    setFilesAndPayloads: setContextFilesAndPayloads,
     markPayloadEdited,
     setSteps,
     setFolder,
@@ -146,6 +144,15 @@ function ToolPlaygroundInner({
   const toolId = tool.id;
   const folder = tool.folder;
   const isArchived = tool.isArchived;
+  const { setShowAgent, agentPortalRef, AgentSidebarComponent } = useRightSidebar();
+
+  useEffect(() => {
+    if (!isArchived && !renderAgentInline && AgentSidebarComponent) {
+      setShowAgent(true);
+    }
+    return () => setShowAgent(false);
+  }, [isArchived, setShowAgent, renderAgentInline, AgentSidebarComponent]);
+
   const finalTransform = toolConfig.finalTransform;
   const responseSchema = toolConfig.responseSchema;
   const inputSchema = toolConfig.inputSchema;
@@ -155,24 +162,21 @@ function ToolPlaygroundInner({
   const computedPayload = payload.computedPayload;
 
   const localFileUpload = useFileUpload({
+    onFilesChange: (files, payloads) => {
+      // Use combined setter for atomic update to prevent mismatched state
+      setContextFilesAndPayloads(files, payloads);
+    },
     onPayloadTextUpdate: (updater) => setPayloadText(updater(manualPayloadText)),
     onUserEdit: markPayloadEdited,
+    externalFiles: payload.uploadedFiles,
+    externalPayloads: payload.filePayloads,
   });
 
   const uploadedFiles = parentUploadedFiles ?? payload.uploadedFiles;
   const totalFileSize = parentTotalFileSize ?? localFileUpload.totalFileSize;
   const isProcessingFiles = parentIsProcessingFiles ?? localFileUpload.isProcessing;
 
-  const parsedResponseSchema = useMemo(() => {
-    if (!responseSchema) return undefined;
-    try {
-      return JSON.parse(responseSchema);
-    } catch {
-      return undefined;
-    }
-  }, [responseSchema]);
-
-  const { loading, saving, justSaved, saveTool, setLoading } = useToolData({
+  const { loading, saving, justSaved, loadTool, saveTool, setLoading } = useToolData({
     id,
     initialTool,
     initialInstruction,
@@ -186,13 +190,12 @@ function ToolPlaygroundInner({
 
   type DialogState =
     | { type: "none" }
-    | { type: "fixStep"; stepIndex: number }
-    | { type: "fixTransform" }
     | { type: "invalidPayload" }
     | { type: "modifyStepConfirm"; stepIndex: number };
 
   const [activeDialog, setActiveDialog] = useState<DialogState>({ type: "none" });
   const modifyStepResolveRef = useRef<((shouldContinue: boolean) => void) | null>(null);
+  const skipModifyConfirmRef = useRef<boolean>(false);
   const isExecutingStep = contextCurrentExecutingStepIndex;
   const hasGeneratedDefaultPayloadRef = useRef<boolean>(false);
 
@@ -201,7 +204,6 @@ function ToolPlaygroundInner({
     inputSchema,
     hasUserEdited: hasUserEditedPayload,
   });
-  const [showToolBuilder, setShowToolBuilder] = useState(false);
 
   const {
     executeTool: executeToolFromHook,
@@ -238,42 +240,6 @@ function ToolPlaygroundInner({
     }
   }, [inputSchema, manualPayloadText, hasUserEditedPayload, setPayloadText]);
 
-  const extractIntegrationIds = (steps: ExecutionStep[]): string[] => {
-    return Array.from(new Set(steps.map((s) => s.integrationId).filter(Boolean) as string[]));
-  };
-
-  const handleToolRebuilt = (rebuiltTool: Tool, context: BuildContext) => {
-    setToolId(rebuiltTool.id);
-    setFolder(rebuiltTool.folder);
-    setSteps(
-      rebuiltTool.steps?.map((step) => ({
-        ...step,
-        apiConfig: { ...step.apiConfig, id: step.apiConfig.id || step.id },
-      })) || [],
-    );
-    setFinalTransform(rebuiltTool.finalTransform || finalTransform);
-    setResponseSchema(
-      rebuiltTool.responseSchema ? JSON.stringify(rebuiltTool.responseSchema, null, 2) : "",
-    );
-    setInputSchema(
-      rebuiltTool.inputSchema ? JSON.stringify(rebuiltTool.inputSchema, null, 2) : null,
-    );
-    setInstruction(context.instruction);
-    setPayloadText(context.payload);
-
-    setContextUploadedFiles(context.uploadedFiles);
-    setContextFilePayloads(context.filePayloads);
-
-    if (parentOnFilesChange) {
-      parentOnFilesChange(context.uploadedFiles, context.filePayloads);
-    }
-
-    clearAllExecutions();
-
-    setShowToolBuilder(false);
-    onRebuildEnd?.();
-  };
-
   const extractPayloadSchema = (fullInputSchema: string | null): any | null => {
     if (!fullInputSchema || fullInputSchema.trim() === "") return null;
     try {
@@ -309,7 +275,7 @@ function ToolPlaygroundInner({
   const handleBeforeStepExecution = async (stepIndex: number, step: any): Promise<boolean> => {
     if (shouldAbortRef.current || externalShouldStop) return false;
 
-    if (step.modify === true) {
+    if (step.modify === true && !skipModifyConfirmRef.current) {
       return new Promise((resolve) => {
         modifyStepResolveRef.current = resolve;
         setActiveDialog({ type: "modifyStepConfirm", stepIndex });
@@ -318,7 +284,10 @@ function ToolPlaygroundInner({
     return true;
   };
 
-  const handleModifyStepConfirm = () => {
+  const handleModifyStepConfirm = (skipFutureConfirmations: boolean) => {
+    if (skipFutureConfirmations) {
+      skipModifyConfirmRef.current = true;
+    }
     setActiveDialog({ type: "none" });
     modifyStepResolveRef.current?.(true);
     modifyStepResolveRef.current = null;
@@ -387,12 +356,8 @@ function ToolPlaygroundInner({
       executeTool,
       saveTool,
       getCurrentTool,
-      closeRebuild: () => {
-        setShowToolBuilder(false);
-        onRebuildEnd?.();
-      },
     }),
-    [onRebuildEnd, executeTool, saveTool, getCurrentTool],
+    [executeTool, saveTool, getCurrentTool],
   );
 
   const handleStepEdit = (stepId: string, updatedStep: any, _isUserInitiated?: boolean) => {
@@ -418,33 +383,8 @@ function ToolPlaygroundInner({
     await executeStepByIdx(idx, { limitIterations: limit });
   };
 
-  const fixStepIndex = activeDialog.type === "fixStep" ? activeDialog.stepIndex : null;
-
-  const handleOpenFixStepDialog = (idx: number) =>
-    setActiveDialog({ type: "fixStep", stepIndex: idx });
-  const handleCloseFixStepDialog = () => setActiveDialog({ type: "none" });
-
-  const handleFixStepSuccess = (updatedStep: any) => {
-    if (fixStepIndex === null) return;
-    handleStepEdit(steps[fixStepIndex].id, updatedStep, true);
-  };
-
-  const handleFixStep = async (updatedInstruction: string): Promise<void> => {
-    if (fixStepIndex === null) return;
-    await executeStepByIdx(fixStepIndex, { selfHealing: true, updatedInstruction });
-  };
-
   const handleExecuteTransform = async (schemaStr: string, transformStr: string): Promise<void> => {
     await executeTransform(schemaStr, transformStr);
-  };
-
-  const handleOpenFixTransformDialog = () => setActiveDialog({ type: "fixTransform" });
-  const handleCloseFixTransformDialog = () => setActiveDialog({ type: "none" });
-
-  const handleFixTransformSuccess = (newTransform: string, transformedData: any) => {
-    setFinalTransform(newTransform);
-    setFinalResult(transformedData, "completed");
-    setNavigateToFinalSignal(Date.now());
   };
 
   const handleUnarchive = async () => {
@@ -475,8 +415,12 @@ function ToolPlaygroundInner({
           refreshTools();
           router.push(`/tools/${encodeURIComponent(newId)}`);
         }}
-        onArchived={() => router.push("/configs")}
+        onDuplicated={(newId) => {
+          router.push(`/tools/${encodeURIComponent(newId)}`);
+        }}
+        onArchived={() => router.push("/tools")}
         onUnarchived={() => setIsArchived(false)}
+        onRestored={() => toolId && loadTool(toolId)}
       />
     </div>
   ) : null;
@@ -494,7 +438,7 @@ function ToolPlaygroundInner({
             <Button
               variant="outline"
               onClick={handleStopExecution}
-              disabled={saving || isExecutingStep != null || isExecutingTransform}
+              disabled={saving}
               className="h-9 px-4"
             >
               <Square className="h-4 w-4" />
@@ -510,20 +454,7 @@ function ToolPlaygroundInner({
               className="h-9 px-4"
             >
               <Play className="h-4 w-4" />
-              Run all Steps
-            </Button>
-          )}
-          {!hideRebuildButton && !isArchived && (
-            <Button
-              variant="outline"
-              onClick={() => {
-                onRebuildStart?.();
-                setShowToolBuilder(true);
-              }}
-              className="h-9 px-5"
-            >
-              <Hammer className="h-4 w-4" />
-              Rebuild
+              Run All Steps
             </Button>
           )}
           {!embedded && toolId && !isArchived && (
@@ -560,189 +491,128 @@ function ToolPlaygroundInner({
     </div>
   );
 
-  if (showToolBuilder) {
-    const payloadSchema = extractPayloadSchema(inputSchema);
-    const payloadSchemaString = payloadSchema ? JSON.stringify(payloadSchema, null, 2) : null;
-
-    return (
-      <div
-        className={
-          embedded ? "w-full h-full" : "pt-2 px-6 pb-6 max-w-none w-full h-screen flex flex-col"
-        }
-      >
-        {!embedded && !hideHeader && (
-          <div className="flex justify-between items-center mb-4">
-            <h2 className="text-xl font-semibold">Edit & Rebuild Tool</h2>
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => {
-                setShowToolBuilder(false);
-                onRebuildEnd?.();
-              }}
-            >
-              <X className="h-4 w-4" />
-            </Button>
-          </div>
-        )}
-        <div className="flex-1 overflow-hidden">
-          <ToolBuilder
-            initialView="instructions"
-            initialIntegrationIds={extractIntegrationIds(steps)}
-            initialInstruction={tool.instruction}
-            initialPayload={manualPayloadText}
-            initialResponseSchema={responseSchema}
-            initialInputSchema={payloadSchemaString}
-            initialFiles={uploadedFiles}
-            onToolBuilt={handleToolRebuilt}
-            mode="rebuild"
-          />
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div
       className={
-        embedded ? "w-full h-full" : "pt-2 px-6 pb-6 max-w-none w-full h-screen flex flex-col"
+        embedded
+          ? renderAgentInline
+            ? "w-full h-full flex"
+            : "w-full h-full"
+          : "pt-2 px-6 pb-6 max-w-none w-full h-screen flex flex-col"
       }
     >
-      {!embedded && !hideHeader && (
-        <div className="flex justify-end items-center mb-1 flex-shrink-0">
-          <Button
-            variant="ghost"
-            size="icon"
-            className="shrink-0"
-            onClick={() => router.push("/configs")}
-            aria-label="Close"
-          >
-            <X className="h-4 w-4" />
-          </Button>
-        </div>
-      )}
-
-      <div className="w-full flex-1 overflow-hidden">
-        <div className="w-full h-full">
-          <div className="h-full">
-            <div className={embedded ? "h-full" : "h-full"}>
-              {loading && steps.length === 0 && !instructions ? (
-                <div className="flex items-center justify-center py-20">
-                  <div className="flex flex-col items-center gap-3">
-                    <Loader2 className="h-8 w-8 animate-spin text-foreground" />
-                  </div>
+      {/* Main playground content */}
+      <div className={renderAgentInline ? "flex-1 flex flex-col overflow-hidden" : "contents"}>
+        <div className="w-full flex-1 overflow-hidden flex mt-4">
+          {/* Main content area */}
+          <div className="flex-1 h-full overflow-hidden">
+            <div className="w-full h-full">
+              <div className="h-full">
+                <div className={embedded ? "h-full" : "h-full"}>
+                  {loading && steps.length === 0 && !instructions ? (
+                    <div className="flex items-center justify-center py-20">
+                      <div className="flex flex-col items-center gap-3">
+                        <Loader2 className="h-8 w-8 animate-spin text-foreground" />
+                      </div>
+                    </div>
+                  ) : (
+                    <ToolStepGallery
+                      onStepEdit={handleStepEdit}
+                      onInstructionEdit={embedded ? onInstructionEdit : undefined}
+                      onExecuteStep={handleExecuteStep}
+                      onExecuteStepWithLimit={handleExecuteStepWithLimit}
+                      onExecuteTransform={handleExecuteTransform}
+                      onAbort={currentRunId ? handleStopExecution : undefined}
+                      onFilesUpload={handleFilesUpload}
+                      onFileRemove={handleFileRemove}
+                      toolActionButtons={toolActionButtons}
+                      headerActions={
+                        headerActions !== undefined ? headerActions : defaultHeaderActions
+                      }
+                      navigateToFinalSignal={navigateToFinalSignal}
+                      showStepOutputSignal={showStepOutputSignal}
+                      focusStepId={focusStepId}
+                      isProcessingFiles={isProcessingFiles}
+                      totalFileSize={totalFileSize}
+                      isPayloadValid={isPayloadValid}
+                      embedded={embedded}
+                    />
+                  )}
                 </div>
-              ) : (
-                <ToolStepGallery
-                  onStepEdit={handleStepEdit}
-                  onInstructionEdit={embedded ? onInstructionEdit : undefined}
-                  onExecuteStep={handleExecuteStep}
-                  onExecuteStepWithLimit={handleExecuteStepWithLimit}
-                  onOpenFixStepDialog={handleOpenFixStepDialog}
-                  onExecuteTransform={handleExecuteTransform}
-                  onOpenFixTransformDialog={handleOpenFixTransformDialog}
-                  onAbort={currentRunId ? handleStopExecution : undefined}
-                  onFilesUpload={handleFilesUpload}
-                  onFileRemove={handleFileRemove}
-                  toolActionButtons={toolActionButtons}
-                  headerActions={headerActions !== undefined ? headerActions : defaultHeaderActions}
-                  navigateToFinalSignal={navigateToFinalSignal}
-                  showStepOutputSignal={showStepOutputSignal}
-                  focusStepId={focusStepId}
-                  isProcessingFiles={isProcessingFiles}
-                  totalFileSize={totalFileSize}
-                  isPayloadValid={isPayloadValid}
-                  embedded={embedded}
-                />
-              )}
+              </div>
             </div>
           </div>
         </div>
+
+        <AlertDialog
+          open={activeDialog.type === "invalidPayload"}
+          onOpenChange={(open) => !open && setActiveDialog({ type: "none" })}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Tool Input Does Not Match Input Schema</AlertDialogTitle>
+              <AlertDialogDescription>
+                Your tool input does not match the input schema. This may cause execution to fail.
+                You can edit the input and schema in the Start (Tool Input) Card.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={() => {
+                  setActiveDialog({ type: "none" });
+                  executeTool();
+                }}
+              >
+                Run Anyway
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+
+        {pendingModifyStepIndex !== null && (
+          <ModifyStepConfirmDialog
+            open={activeDialog.type === "modifyStepConfirm"}
+            stepId={steps[pendingModifyStepIndex]?.id}
+            stepName={steps[pendingModifyStepIndex]?.id}
+            onConfirm={handleModifyStepConfirm}
+            onCancel={handleModifyStepCancel}
+          />
+        )}
+
+        {/* Portal agent into sidebar (when not inline) - hideHeader since RightSidebar has tabs */}
+        {!isArchived &&
+          !renderAgentInline &&
+          agentPortalRef &&
+          AgentSidebarComponent &&
+          createPortal(
+            <AgentSidebarComponent className="h-full" hideHeader initialError={initialError} />,
+            agentPortalRef,
+          )}
       </div>
 
-      <AlertDialog
-        open={activeDialog.type === "invalidPayload"}
-        onOpenChange={(open) => !open && setActiveDialog({ type: "none" })}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Tool Input Does Not Match Input Schema</AlertDialogTitle>
-            <AlertDialogDescription>
-              Your tool input does not match the input schema. This may cause execution to fail. You
-              can edit the input and schema in the Start (Tool Input) Card.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                setActiveDialog({ type: "none" });
-                executeTool();
-              }}
-            >
-              Run Anyway
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      {fixStepIndex !== null && (
-        <FixStepDialog
-          open={activeDialog.type === "fixStep"}
-          onClose={handleCloseFixStepDialog}
-          step={steps[fixStepIndex]}
-          stepInput={buildStepInput(computedPayload || {}, steps, stepResultsMap, fixStepIndex - 1)}
-          integrationId={steps[fixStepIndex]?.integrationId}
-          errorMessage={(() => {
-            const result = stepResultsMap[steps[fixStepIndex]?.id];
-            const msg = typeof result === "string" ? result : result?.error;
-            return msg && !isAbortError(msg) ? msg : undefined;
-          })()}
-          onSuccess={handleFixStepSuccess}
-          onAutoHeal={handleFixStep}
-          onAbort={handleStopExecution}
-        />
+      {/* Inline agent sidebar */}
+      {!isArchived && renderAgentInline && AgentSidebarComponent && (
+        <div className="w-[420px] border-l border-border flex-shrink-0 h-full overflow-hidden">
+          <AgentSidebarComponent className="h-full" initialError={initialError} />
+        </div>
       )}
-
-      {pendingModifyStepIndex !== null && (
-        <ModifyStepConfirmDialog
-          open={activeDialog.type === "modifyStepConfirm"}
-          stepId={steps[pendingModifyStepIndex]?.id}
-          stepName={steps[pendingModifyStepIndex]?.id}
-          onConfirm={handleModifyStepConfirm}
-          onCancel={handleModifyStepCancel}
-        />
-      )}
-
-      <FixTransformDialog
-        open={activeDialog.type === "fixTransform"}
-        onClose={handleCloseFixTransformDialog}
-        currentTransform={finalTransform}
-        responseSchema={parsedResponseSchema}
-        stepData={buildStepInput(computedPayload || {}, steps, stepResultsMap, steps.length - 1)}
-        errorMessage={
-          typeof stepResultsMap["__final_transform__"] === "string"
-            ? stepResultsMap["__final_transform__"]
-            : undefined
-        }
-        onSuccess={handleFixTransformSuccess}
-        onLoadingChange={(loading) => setTransformStatus(loading ? "fixing" : "idle")}
-      />
     </div>
   );
 }
 
 const ToolPlayground = forwardRef<ToolPlaygroundHandle, ToolPlaygroundProps>((props, ref) => {
-  const { integrations: contextIntegrations } = useIntegrations();
-  const integrations = props.integrations || contextIntegrations;
+  const { systems: contextSystems } = useSystems();
+  const systems = props.systems || contextSystems;
 
   return (
     <ToolConfigProvider
       initialTool={props.initialTool}
       initialPayload={props.initialPayload}
       initialInstruction={props.initialInstruction}
-      integrations={integrations}
+      systems={systems}
       externalUploadedFiles={props.uploadedFiles}
+      externalFilePayloads={props.filePayloads}
       onExternalFilesChange={props.onFilesChange}
     >
       <ExecutionProvider>

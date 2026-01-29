@@ -1,16 +1,24 @@
 "use client";
 
-import { createContext, useContext, useCallback, useMemo, useState, ReactNode } from "react";
-import { ExecutionStep, Integration, Tool } from "@superglue/shared";
-import { computeToolPayload } from "@/src/lib/general-utils";
 import { UploadedFileInfo } from "@/src/lib/file-utils";
-import { ToolConfigContextValue, ToolDefinition, PayloadState } from "./types";
+import { computeToolPayload } from "@/src/lib/general-utils";
+import { ExecutionStep, System, ResponseFilter, Tool } from "@superglue/shared";
+import {
+  createContext,
+  ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+import { PayloadState, ToolConfigContextValue, ToolDefinition } from "./types";
 
 interface ToolConfigProviderProps {
   initialTool?: Tool;
   initialPayload?: string;
   initialInstruction?: string;
-  integrations?: Integration[];
+  systems?: System[];
   // External state for embedded mode
   externalUploadedFiles?: UploadedFileInfo[];
   externalFilePayloads?: Record<string, any>;
@@ -32,7 +40,7 @@ export function ToolConfigProvider({
   initialTool,
   initialPayload = "{}",
   initialInstruction,
-  integrations = [],
+  systems = [],
   externalUploadedFiles,
   externalFilePayloads,
   onExternalFilesChange,
@@ -54,19 +62,51 @@ export function ToolConfigProvider({
   );
   const [folder, setFolder] = useState<string | undefined>(initialTool?.folder);
   const [isArchived, setIsArchived] = useState(initialTool?.archived || false);
+  const [responseFilters, setResponseFilters] = useState<ResponseFilter[]>(
+    initialTool?.responseFilters || [],
+  );
 
   const [manualPayloadText, setManualPayloadText] = useState(initialPayload);
   const [localUploadedFiles, setLocalUploadedFiles] = useState<UploadedFileInfo[]>([]);
   const [localFilePayloads, setLocalFilePayloads] = useState<Record<string, any>>({});
   const [hasUserEdited, setHasUserEdited] = useState(false);
 
+  // Load saved payload from localStorage on tool load
+  useEffect(() => {
+    if (!toolId) return;
+
+    const STORAGE_KEY = `superglue-payload:${toolId}`;
+    try {
+      const savedPayload = localStorage.getItem(STORAGE_KEY);
+      if (savedPayload && savedPayload !== initialPayload) {
+        setManualPayloadText(savedPayload);
+      }
+    } catch (error) {
+      console.error("Failed to load payload from localStorage:", error);
+    }
+  }, [toolId, initialPayload]);
+
   // Use external state if provided (embedded mode), otherwise use local state
   const uploadedFiles = externalUploadedFiles ?? localUploadedFiles;
   const filePayloads = externalFilePayloads ?? localFilePayloads;
 
+  // Combined setter for atomic updates - prevents mismatched state in parent callbacks
+  const setFilesAndPayloads = useCallback(
+    (files: UploadedFileInfo[], payloads: Record<string, any>) => {
+      if (onExternalFilesChange) {
+        onExternalFilesChange(files, payloads);
+      } else {
+        setLocalUploadedFiles(files);
+        setLocalFilePayloads(payloads);
+      }
+    },
+    [onExternalFilesChange],
+  );
+
   const setUploadedFiles = useCallback(
     (files: UploadedFileInfo[]) => {
       if (onExternalFilesChange) {
+        // Use the combined setter to ensure atomic update
         onExternalFilesChange(files, filePayloads);
       } else {
         setLocalUploadedFiles(files);
@@ -78,6 +118,7 @@ export function ToolConfigProvider({
   const setFilePayloads = useCallback(
     (payloads: Record<string, any>) => {
       if (onExternalFilesChange) {
+        // Use the combined setter to ensure atomic update
         onExternalFilesChange(uploadedFiles, payloads);
       } else {
         setLocalFilePayloads(payloads);
@@ -112,8 +153,18 @@ export function ToolConfigProvider({
       responseSchema: parsedResponseSchema,
       folder,
       isArchived,
+      responseFilters,
     };
-  }, [toolId, instruction, finalTransform, inputSchema, responseSchema, folder, isArchived]);
+  }, [
+    toolId,
+    instruction,
+    finalTransform,
+    inputSchema,
+    responseSchema,
+    folder,
+    isArchived,
+    responseFilters,
+  ]);
 
   const payload = useMemo<PayloadState>(
     () => ({
@@ -159,13 +210,13 @@ export function ToolConfigProvider({
     [steps],
   );
 
-  const getStepIntegration = useCallback(
+  const getStepSystem = useCallback(
     (stepId: string) => {
       const step = steps.find((s) => s.id === stepId);
-      if (!step?.integrationId) return undefined;
-      return integrations.find((i) => i.id === step.integrationId);
+      if (!step?.systemId) return undefined;
+      return systems.find((i) => i.id === step.systemId);
     },
-    [steps, integrations],
+    [steps, systems],
   );
 
   const value = useMemo<ToolConfigContextValue>(
@@ -173,11 +224,12 @@ export function ToolConfigProvider({
       tool,
       steps,
       payload,
-      integrations,
+      systems,
 
       inputSchema,
       responseSchema,
       finalTransform,
+      responseFilters,
 
       setToolId,
       setInstruction,
@@ -186,10 +238,12 @@ export function ToolConfigProvider({
       setResponseSchema,
       setFolder,
       setIsArchived,
+      setResponseFilters,
 
       setPayloadText: setManualPayloadText,
       setUploadedFiles,
       setFilePayloads,
+      setFilesAndPayloads,
       markPayloadEdited: () => setHasUserEdited(true),
 
       addStep,
@@ -199,22 +253,24 @@ export function ToolConfigProvider({
 
       getStepConfig,
       getStepIndex,
-      getStepIntegration,
+      getStepSystem,
     }),
     [
       tool,
       steps,
       payload,
-      integrations,
+      systems,
       inputSchema,
       responseSchema,
       finalTransform,
+      responseFilters,
       addStep,
       removeStep,
       updateStep,
+      setFilesAndPayloads,
       getStepConfig,
       getStepIndex,
-      getStepIntegration,
+      getStepSystem,
     ],
   );
 

@@ -1,13 +1,12 @@
 import { Tool } from "@superglue/shared";
 import { ServiceMetadata } from "@superglue/shared";
-import { logMessage } from "../utils/logs.js";
 
 export interface FoundTool {
   id: string;
   instruction?: string;
   inputSchema?: any;
   steps: Array<{
-    integrationId?: string;
+    systemId?: string;
     instruction?: string;
   }>;
   responseSchema?: any;
@@ -28,7 +27,7 @@ export class ToolFinder {
       inputSchema: tool.inputSchema,
       responseSchema: tool.responseSchema,
       steps: tool.steps.map((s) => ({
-        integrationId: s.integrationId,
+        systemId: s.systemId,
         instruction: s.apiConfig?.instruction,
       })),
       reason,
@@ -46,7 +45,7 @@ export class ToolFinder {
         tool.id,
         tool.instruction,
         ...tool.steps.map((s) => s.apiConfig?.instruction),
-        ...tool.steps.map((s) => s.integrationId),
+        ...tool.steps.map((s) => s.systemId),
       ]
         .filter(Boolean)
         .join(" ")
@@ -79,21 +78,14 @@ export class ToolFinder {
 
   public async findTools(query: string | undefined, tools: Tool[]): Promise<FoundTool[]> {
     if (!tools || tools.length === 0) {
-      logMessage("info", "No tools available for selection.", this.metadata);
       return [];
     }
 
     if (!query || query.trim() === "" || query.trim() === "*" || query.trim() === "all") {
-      logMessage(
-        "info",
-        "No specific query provided, returning all available tools.",
-        this.metadata,
-      );
       return tools.map((tool) => this.enrichTool(tool, "Available tool"));
     }
 
     const results = this.keywordSearch(query, tools);
-    logMessage("info", `Found ${results.length} tools matching search terms`, this.metadata);
     return results;
   }
 }

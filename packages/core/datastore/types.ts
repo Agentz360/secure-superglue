@@ -3,12 +3,35 @@ import type {
   DiscoveryRun,
   FileReference,
   FileStatus,
-  Integration,
+  RequestSource,
+  System,
   Run,
   RunStatus,
   Tool,
   ToolSchedule,
 } from "@superglue/shared";
+
+export type PrometheusRunStatusLabel = "success" | "failed" | "aborted";
+export type PrometheusRunSourceLabel =
+  | "api"
+  | "frontend"
+  | "scheduler"
+  | "mcp"
+  | "tool-chain"
+  | "webhook";
+
+export type PrometheusRunMetrics = {
+  runsTotal: Array<{
+    status: PrometheusRunStatusLabel;
+    source: PrometheusRunSourceLabel;
+    value: number;
+  }>;
+  runDurationSecondsP95: Array<{
+    source: PrometheusRunSourceLabel;
+    windowSeconds: number;
+    value: number;
+  }>;
+};
 
 export interface DataStore {
   // API Config Methods
@@ -28,10 +51,15 @@ export interface DataStore {
     offset?: number;
     configId?: string;
     status?: RunStatus;
+    requestSources?: RequestSource[];
     orgId?: string;
   }): Promise<{ items: Run[]; total: number }>;
-  createRun(params: { run: Run }): Promise<Run>;
+  createRun(params: { run: Run; orgId?: string }): Promise<Run>;
   updateRun(params: { id: string; orgId: string; updates: Partial<Run> }): Promise<Run>;
+  getPrometheusRunMetrics(params: {
+    orgId: string;
+    windowSeconds: number;
+  }): Promise<PrometheusRunMetrics>;
 
   // Workflow Methods
   getWorkflow(params: { id: string; orgId?: string }): Promise<Tool | null>;
@@ -40,37 +68,45 @@ export interface DataStore {
     offset?: number;
     orgId?: string;
   }): Promise<{ items: Tool[]; total: number }>;
-  upsertWorkflow(params: { id: string; workflow: Tool; orgId?: string }): Promise<Tool>;
+  upsertWorkflow(params: {
+    id: string;
+    workflow: Tool;
+    orgId?: string;
+    userId?: string;
+    userEmail?: string;
+  }): Promise<Tool>;
   deleteWorkflow(params: { id: string; orgId?: string }): Promise<boolean>;
   renameWorkflow(params: { oldId: string; newId: string; orgId?: string }): Promise<Tool>;
+
+  // Tool History Methods (Postgres-only, returns empty for other stores)
+  listToolHistory(params: { toolId: string; orgId?: string }): Promise<ToolHistoryEntry[]>;
+  restoreToolVersion(params: {
+    toolId: string;
+    version: number;
+    orgId?: string;
+    userId?: string;
+    userEmail?: string;
+  }): Promise<Tool>;
 
   // Tenant Information Methods
   getTenantInfo(): Promise<{ email: string | null; emailEntrySkipped: boolean }>;
   setTenantInfo(params?: { email?: string; emailEntrySkipped?: boolean }): Promise<void>;
 
-  // Integration Methods
-  getIntegration(params: {
-    id: string;
-    includeDocs?: boolean;
-    orgId?: string;
-  }): Promise<Integration | null>;
-  listIntegrations(params?: {
+  // System Methods
+  getSystem(params: { id: string; includeDocs?: boolean; orgId?: string }): Promise<System | null>;
+  listSystems(params?: {
     limit?: number;
     offset?: number;
     includeDocs?: boolean;
     orgId?: string;
-  }): Promise<{ items: Integration[]; total: number }>;
-  upsertIntegration(params: {
-    id: string;
-    integration: Integration;
-    orgId?: string;
-  }): Promise<Integration>;
-  deleteIntegration(params: { id: string; orgId?: string }): Promise<boolean>;
-  getManyIntegrations(params: {
+  }): Promise<{ items: System[]; total: number }>;
+  upsertSystem(params: { id: string; system: System; orgId?: string }): Promise<System>;
+  deleteSystem(params: { id: string; orgId?: string }): Promise<boolean>;
+  getManySystems(params: {
     ids: string[];
     includeDocs?: boolean;
     orgId?: string;
-  }): Promise<Integration[]>;
+  }): Promise<System[]>;
   getTemplateOAuthCredentials(params: {
     templateId: string;
   }): Promise<{ client_id: string; client_secret: string } | null>;
@@ -85,21 +121,18 @@ export interface DataStore {
   getOAuthSecret(params: {
     uid: string;
   }): Promise<{ clientId: string; clientSecret: string } | null>;
-  copyTemplateDocumentationToUserIntegration(params: {
+  copyTemplateDocumentationToUserSystem(params: {
     templateId: string;
-    userIntegrationId: string;
+    userSystemId: string;
     orgId?: string;
   }): Promise<boolean>;
 
-  // Workflow Schedule
-  listWorkflowSchedules(params: {
-    workflowId?: string;
-    orgId: string;
-  }): Promise<ToolScheduleInternal[]>;
-  getWorkflowSchedule(params: { id: string; orgId?: string }): Promise<ToolScheduleInternal | null>;
-  upsertWorkflowSchedule(params: { schedule: ToolScheduleInternal });
-  deleteWorkflowSchedule(params: { id: string; orgId: string }): Promise<boolean>;
-  listDueWorkflowSchedules(): Promise<ToolScheduleInternal[]>;
+  // Tool Schedules
+  listToolSchedules(params: { toolId?: string; orgId: string }): Promise<ToolScheduleInternal[]>;
+  getToolSchedule(params: { id: string; orgId?: string }): Promise<ToolScheduleInternal | null>;
+  upsertToolSchedule(params: { schedule: ToolScheduleInternal }): Promise<void>;
+  deleteToolSchedule(params: { id: string; orgId: string }): Promise<boolean>;
+  listDueToolSchedules(): Promise<ToolScheduleInternal[]>;
   updateScheduleNextRun(params: { id: string; nextRunAt: Date; lastRunAt: Date }): Promise<boolean>;
 
   // DiscoveryRun Methods
@@ -137,4 +170,12 @@ export interface DataStore {
 
 export type ToolScheduleInternal = ToolSchedule & {
   orgId: string;
+};
+
+export type ToolHistoryEntry = {
+  version: number;
+  createdAt: Date;
+  createdByUserId?: string;
+  createdByEmail?: string;
+  tool: Tool;
 };

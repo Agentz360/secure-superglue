@@ -41,7 +41,7 @@ export interface FetchSummary {
  */
 export class DocumentationEvalFetcher {
   private metadata = { orgId: 'documentation-eval', userId: 'system' };
-  private createdIntegrationIds: string[] = [];
+  private createdSystemIds: string[] = [];
 
   constructor(private datastore: DataStore, private orgId: string) {
     this.metadata = { orgId, userId: 'system' };
@@ -141,10 +141,10 @@ export class DocumentationEvalFetcher {
    * Store documentation in datastore
    */
   private async storeDocumentation(site: DocumentationSite, documentation: string, openApiSchema: string): Promise<void> {
-    const integrationId = `doc-eval-${site.id}`;
+    const systemId = `doc-eval-${site.id}`;
     
-    const integration = {
-      id: integrationId,
+    const system = {
+      id: systemId,
       name: `${site.name} Documentation`,
       urlHost: site.urlHost,
       urlPath: site.urlPath || '',
@@ -157,13 +157,13 @@ export class DocumentationEvalFetcher {
       updatedAt: new Date()
     };
 
-    await this.datastore.upsertIntegration({
-      id: integrationId,
-      integration,
+    await this.datastore.upsertSystem({
+      id: systemId,
+      system,
       orgId: this.orgId
     });
 
-    this.createdIntegrationIds.push(integrationId);
+    this.createdSystemIds.push(systemId);
   }
 
   /**
@@ -267,17 +267,17 @@ export class DocumentationEvalFetcher {
   }
 
   /**
-   * Clean up created integrations
+   * Clean up created systems
    */
   async cleanup(): Promise<void> {
-    if (this.createdIntegrationIds.length > 0) {
-      logMessage('info', `Cleaned up ${this.createdIntegrationIds.length} integrations`, this.metadata);
+    if (this.createdSystemIds.length > 0) {
+      logMessage('info', `Cleaned up ${this.createdSystemIds.length} systems`, this.metadata);
       
-      for (const integrationId of this.createdIntegrationIds) {
+      for (const systemId of this.createdSystemIds) {
         try {
-          await this.datastore.deleteIntegration({ id: integrationId, orgId: this.orgId });
+          await this.datastore.deleteSystem({ id: systemId, orgId: this.orgId });
         } catch (error) {
-          logMessage('warn', `Failed to delete integration ${integrationId}: ${error}`, this.metadata);
+          logMessage('warn', `Failed to delete system ${systemId}: ${error}`, this.metadata);
         }
       }
     }

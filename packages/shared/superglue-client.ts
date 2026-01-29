@@ -1,9 +1,6 @@
 import axios from "axios";
 import {
-  ApiCallArgs,
   ApiConfig,
-  ApiInputRequest,
-  ApiResult,
   BuildToolArgs,
   CallEndpointArgs,
   CallEndpointResult,
@@ -14,17 +11,16 @@ import {
   FixToolArgs,
   FixToolResult,
   GenerateStepConfigArgs,
-  Integration,
   Log,
   Run,
+  RunStatus,
   SuggestedTool,
+  System,
   Tool,
   ToolArgs,
   ToolDiff,
   ToolInputRequest,
   ToolResult,
-  ToolSchedule,
-  ToolScheduleInput,
   ToolStepResult,
   UpsertMode,
 } from "./types.js";
@@ -38,7 +34,7 @@ export class SuperglueClient {
   private endpoint: string;
   private apiKey: string;
   private wsManager: WebSocketManager;
-  private apiEndpoint: string;
+  public readonly apiEndpoint: string;
 
   private static workflowQL = `
         id
@@ -57,27 +53,19 @@ export class SuperglueClient {
             queryParams
             headers
             body
-            documentationUrl
-            responseSchema
-            responseMapping
-            authentication
             pagination {
               type
               pageSize
               cursorPath
               stopCondition
             }
-            dataPath
           }
-          integrationId
+          systemId
           executionMode
           loopSelector
-          loopMaxIters
-          inputMapping
-          responseMapping
           failureBehavior
         }
-        integrationIds
+        systemIds
         responseSchema
         originalResponseSchema
         finalTransform
@@ -85,20 +73,16 @@ export class SuperglueClient {
         instruction
         folder
         archived
-    `;
-
-  private static workflowScheduleQL = `
-      id
-      workflowId
-      cronExpression
-      timezone
-      enabled
-      payload
-      options
-      lastRunAt
-      nextRunAt
-      createdAt
-      updatedAt
+        responseFilters {
+          id
+          name
+          enabled
+          target
+          pattern
+          action
+          maskValue
+          scope
+        }
     `;
 
   private static configQL = `
@@ -115,17 +99,12 @@ export class SuperglueClient {
         queryParams
         headers
         body
-        documentationUrl
-        responseSchema
-        responseMapping
-        authentication
         pagination {
           type
           pageSize
           cursorPath
           stopCondition
         }
-        dataPath
       }
       ... on Workflow {
         ${SuperglueClient.workflowQL}
@@ -181,8 +160,10 @@ export class SuperglueClient {
       throw new Error(errorMessage);
     }
 
-    const data = await response.json();
-    return data as T;
+    // Handle empty responses (e.g., 204 No Content)
+    const text = await response.text();
+    if (!text) return undefined as T;
+    return JSON.parse(text) as T;
   }
 
   private async request<T>(query: string, variables?: Record<string, any>): Promise<T> {
@@ -283,10 +264,6 @@ export class SuperglueClient {
             queryParams: step.apiConfig.queryParams,
             headers: step.apiConfig.headers,
             body: step.apiConfig.body,
-            documentationUrl: step.apiConfig.documentationUrl,
-            responseSchema: step.apiConfig.responseSchema,
-            responseMapping: step.apiConfig.responseMapping,
-            authentication: step.apiConfig.authentication,
             pagination: step.apiConfig.pagination
               ? {
                   type: step.apiConfig.pagination.type,
@@ -301,7 +278,6 @@ export class SuperglueClient {
                   }),
                 }
               : undefined,
-            dataPath: step.apiConfig.dataPath,
             version: step.apiConfig.version,
           };
           Object.keys(apiConfigInput).forEach(
@@ -313,12 +289,9 @@ export class SuperglueClient {
             id: step.id,
             modify: step.modify,
             apiConfig: apiConfigInput,
-            integrationId: step.integrationId,
+            systemId: step.systemId,
             executionMode: step.executionMode,
             loopSelector: step.loopSelector,
-            loopMaxIters: step.loopMaxIters,
-            inputMapping: step.inputMapping,
-            responseMapping: step.responseMapping,
             failureBehavior: step.failureBehavior,
           };
           Object.keys(executionStepInput).forEach(
@@ -328,11 +301,12 @@ export class SuperglueClient {
           );
           return executionStepInput;
         }),
-        integrationIds: tool.integrationIds,
+        systemIds: tool.systemIds,
         finalTransform: tool.finalTransform,
         inputSchema: tool.inputSchema,
         responseSchema: tool.responseSchema,
         instruction: tool.instruction,
+        responseFilters: tool.responseFilters,
       };
       Object.keys(toolInput).forEach(
         (key) => (toolInput as any)[key] === undefined && delete (toolInput as any)[key],
@@ -415,18 +389,134 @@ export class SuperglueClient {
     return response.abortToolExecution;
   }
 
+  /**
+   * Execute a single step without creating a run in the database.
+   * Used for individual step testing in the playground.
+   */
+  async executeStep({
+    step,
+    payload,
+    previousResults,
+    credentials,
+    options,
+    runId,
+  }: {
+    step: any;
+    payload?: Record<string, any>;
+    previousResults?: Record<string, any>;
+    credentials?: Record<string, string>;
+    options?: { selfHealing?: boolean; timeout?: number };
+    runId?: string;
+  }): Promise<{
+    stepId: string;
+    success: boolean;
+    data?: any;
+    error?: string;
+    updatedStep?: any;
+  }> {
+    return this.restRequest("POST", "/v1/tools/step/run", {
+      step,
+      payload,
+      previousResults,
+      credentials,
+      options,
+      runId,
+    });
+  }
+
+  /**
+   * Abort an in-flight step execution by runId.
+   */
+  async abortStep(runId: string): Promise<{ success: boolean; runId: string }> {
+    return this.restRequest("POST", "/v1/tools/step/abort", { runId });
+  }
+
+  /**
+   * Execute a final transform without creating a run in the database.
+   * Used for transform testing in the playground.
+   */
+  async executeTransformOnly({
+    finalTransform,
+    responseSchema,
+    inputSchema,
+    payload,
+    stepResults,
+    responseFilters,
+    options,
+    runId,
+  }: {
+    finalTransform: string;
+    responseSchema?: any;
+    inputSchema?: any;
+    payload?: Record<string, any>;
+    stepResults?: Record<string, any>;
+    responseFilters?: any[];
+    options?: { selfHealing?: boolean; timeout?: number };
+    runId?: string;
+  }): Promise<{
+    success: boolean;
+    data?: any;
+    error?: string;
+    updatedTransform?: string;
+    updatedResponseSchema?: any;
+  }> {
+    return this.restRequest("POST", "/v1/tools/transform/run", {
+      finalTransform,
+      responseSchema,
+      inputSchema,
+      payload,
+      stepResults,
+      responseFilters,
+      options,
+      runId,
+    });
+  }
+
+  /**
+   * Create a run entry in the database after manual tool execution.
+   * Used when "Run All Steps" completes in the playground.
+   */
+  async createRun({
+    toolId,
+    toolConfig,
+    status,
+    error,
+    startedAt,
+    completedAt,
+  }: {
+    toolId: string;
+    toolConfig: Tool;
+    status: "success" | "failed" | "aborted";
+    error?: string;
+    startedAt: Date;
+    completedAt: Date;
+  }): Promise<{
+    runId: string;
+    toolId: string;
+    status: string;
+  }> {
+    return this.restRequest("POST", "/v1/runs", {
+      toolId,
+      toolConfig,
+      status,
+      error,
+      startedAt: startedAt.toISOString(),
+      completedAt: completedAt.toISOString(),
+    });
+  }
+
   async buildWorkflow({
     instruction,
     payload,
-    integrationIds,
+    systemIds,
     responseSchema,
     save = true,
     verbose = true,
     traceId,
   }: BuildToolArgs): Promise<Tool> {
     const mutation = `
-        mutation BuildWorkflow($instruction: String!, $payload: JSON, $integrationIds: [ID!], $responseSchema: JSONSchema, $traceId: ID) {
-          buildWorkflow(instruction: $instruction, payload: $payload, integrationIds: $integrationIds, responseSchema: $responseSchema, traceId: $traceId) {${SuperglueClient.workflowQL}}
+        mutation BuildWorkflow($instruction: String!, $payload: JSON, $systemIds: [ID!], $responseSchema: JSONSchema, $traceId: ID) {
+          buildWorkflow(instruction: $instruction, payload: $payload, systemIds: $systemIds, responseSchema: $responseSchema, traceId: $traceId) {${SuperglueClient.workflowQL}}
         }
       `;
 
@@ -460,7 +550,7 @@ export class SuperglueClient {
       const workflow = await this.request<{ buildWorkflow: Tool }>(mutation, {
         instruction,
         payload,
-        integrationIds,
+        systemIds,
         responseSchema: responseSchema ?? {},
         traceId,
       }).then((data) => data.buildWorkflow);
@@ -483,16 +573,18 @@ export class SuperglueClient {
     tool,
     fixInstructions,
     lastError,
-    integrationIds,
+    systemIds,
     verbose = true,
   }: FixToolArgs & { verbose?: boolean }): Promise<FixToolResult> {
     const mutation = `
-        mutation FixWorkflow($workflow: WorkflowInput!, $fixInstructions: String!, $lastError: String, $integrationIds: [ID!]) {
-          fixWorkflow(workflow: $workflow, fixInstructions: $fixInstructions, lastError: $lastError, integrationIds: $integrationIds) {
+        mutation FixWorkflow($workflow: WorkflowInput!, $fixInstructions: String!, $lastError: String, $systemIds: [ID!]) {
+          fixWorkflow(workflow: $workflow, fixInstructions: $fixInstructions, lastError: $lastError, systemIds: $systemIds) {
             workflow {${SuperglueClient.workflowQL}}
             diffs {
-              old_string
-              new_string
+              op
+              path
+              value
+              from
             }
           }
         }
@@ -537,10 +629,6 @@ export class SuperglueClient {
           queryParams: step.apiConfig.queryParams,
           headers: step.apiConfig.headers,
           body: step.apiConfig.body,
-          documentationUrl: step.apiConfig.documentationUrl,
-          responseSchema: step.apiConfig.responseSchema,
-          responseMapping: step.apiConfig.responseMapping,
-          authentication: step.apiConfig.authentication,
           pagination: step.apiConfig.pagination
             ? {
                 type: step.apiConfig.pagination.type,
@@ -555,7 +643,6 @@ export class SuperglueClient {
                 }),
               }
             : undefined,
-          dataPath: step.apiConfig.dataPath,
           version: step.apiConfig.version,
         };
         Object.keys(apiConfigInput).forEach(
@@ -567,12 +654,9 @@ export class SuperglueClient {
           id: step.id,
           modify: step.modify,
           apiConfig: apiConfigInput,
-          integrationId: step.integrationId,
+          systemId: step.systemId,
           executionMode: step.executionMode,
           loopSelector: step.loopSelector,
-          loopMaxIters: step.loopMaxIters,
-          inputMapping: step.inputMapping,
-          responseMapping: step.responseMapping,
           failureBehavior: step.failureBehavior,
         };
         Object.keys(executionStepInput).forEach(
@@ -582,11 +666,12 @@ export class SuperglueClient {
         );
         return executionStepInput;
       }),
-      integrationIds: tool.integrationIds,
+      systemIds: tool.systemIds,
       finalTransform: tool.finalTransform,
       inputSchema: tool.inputSchema,
       responseSchema: tool.responseSchema,
       instruction: tool.instruction,
+      responseFilters: tool.responseFilters,
     };
     Object.keys(toolInput).forEach(
       (key) => (toolInput as any)[key] === undefined && delete (toolInput as any)[key],
@@ -599,7 +684,7 @@ export class SuperglueClient {
           workflow: toolInput,
           fixInstructions,
           lastError,
-          integrationIds,
+          systemIds,
         },
       ).then((data) => data.fixWorkflow);
 
@@ -617,7 +702,7 @@ export class SuperglueClient {
   }
 
   async generateStepConfig({
-    integrationId,
+    systemId,
     currentStepConfig,
     currentDataSelector,
     stepInput,
@@ -626,7 +711,7 @@ export class SuperglueClient {
   }: GenerateStepConfigArgs): Promise<{ config: ApiConfig; dataSelector: string }> {
     const mutation = `
         mutation GenerateStepConfig(
-          $integrationId: String,
+          $systemId: String,
           $currentStepConfig: JSON,
           $currentDataSelector: String,
           $stepInput: JSON,
@@ -634,7 +719,7 @@ export class SuperglueClient {
           $errorMessage: String
         ) {
           generateStepConfig(
-            integrationId: $integrationId,
+            systemId: $systemId,
             currentStepConfig: $currentStepConfig,
             currentDataSelector: $currentDataSelector,
             stepInput: $stepInput,
@@ -653,17 +738,12 @@ export class SuperglueClient {
               queryParams
               headers
               body
-              documentationUrl
-              responseSchema
-              responseMapping
-              authentication
               pagination {
                 type
                 pageSize
                 cursorPath
                 stopCondition
               }
-              dataPath
             }
             dataSelector
           }
@@ -673,7 +753,7 @@ export class SuperglueClient {
     const result = await this.request<{
       generateStepConfig: { config: ApiConfig; dataSelector: string };
     }>(mutation, {
-      integrationId,
+      systemId,
       currentStepConfig,
       currentDataSelector,
       stepInput,
@@ -689,8 +769,8 @@ export class SuperglueClient {
 
   async callEndpoint(args: CallEndpointArgs): Promise<CallEndpointResult> {
     const mutation = `
-        mutation CallEndpoint($integrationId: ID, $method: HttpMethod!, $url: String!, $headers: JSON, $body: String, $timeout: Int) {
-          callEndpoint(integrationId: $integrationId, method: $method, url: $url, headers: $headers, body: $body, timeout: $timeout) {
+        mutation CallEndpoint($systemId: ID, $method: HttpMethod!, $url: String!, $headers: JSON, $body: String, $timeout: Int) {
+          callEndpoint(systemId: $systemId, method: $method, url: $url, headers: $headers, body: $body, timeout: $timeout) {
             success
             status
             statusText
@@ -704,86 +784,6 @@ export class SuperglueClient {
 
     const result = await this.request<{ callEndpoint: CallEndpointResult }>(mutation, args);
     return result.callEndpoint;
-  }
-
-  async call<T = unknown>({
-    id,
-    endpoint,
-    payload,
-    credentials,
-    options,
-  }: ApiCallArgs): Promise<ApiResult & { data: T }> {
-    const mutation = `
-        mutation Call($input: ApiInputRequest!, $payload: JSON, $credentials: JSON, $options: RequestOptions) {
-          call(input: $input, payload: $payload, credentials: $credentials, options: $options) {
-            id
-            success
-            data
-            error
-            headers
-            statusCode
-            startedAt
-            completedAt
-            ${SuperglueClient.configQL}
-          }
-        }
-      `;
-
-    let gqlInput: Partial<ApiInputRequest> = {};
-
-    if (id) {
-      gqlInput = { id };
-    } else if (endpoint) {
-      const apiInput = {
-        id: endpoint.id,
-        urlHost: endpoint.urlHost,
-        instruction: endpoint.instruction,
-        urlPath: endpoint.urlPath,
-        method: endpoint.method,
-        queryParams: endpoint.queryParams,
-        headers: endpoint.headers,
-        body: endpoint.body,
-        documentationUrl: endpoint.documentationUrl,
-        responseSchema: endpoint.responseSchema,
-        responseMapping: endpoint.responseMapping,
-        authentication: endpoint.authentication,
-        pagination: endpoint.pagination
-          ? {
-              type: endpoint.pagination.type,
-              ...(endpoint.pagination.pageSize !== undefined && {
-                pageSize: endpoint.pagination.pageSize,
-              }),
-              ...(endpoint.pagination.cursorPath !== undefined && {
-                cursorPath: endpoint.pagination.cursorPath,
-              }),
-              ...(endpoint.pagination.stopCondition !== undefined && {
-                stopCondition: endpoint.pagination.stopCondition,
-              }),
-            }
-          : undefined,
-        dataPath: endpoint.dataPath,
-        version: endpoint.version,
-      };
-      Object.keys(apiInput).forEach(
-        (key) => (apiInput as any)[key] === undefined && delete (apiInput as any)[key],
-      );
-      gqlInput = { endpoint: apiInput };
-    } else {
-      throw new Error("Either id or endpoint must be provided for call.");
-    }
-
-    const result = await this.request<{ call: ApiResult & { data: T } }>(mutation, {
-      input: gqlInput,
-      payload,
-      credentials,
-      options,
-    }).then((data) => data?.call);
-
-    if (result.error) {
-      throw new Error(result.error);
-    }
-
-    return result;
   }
 
   async extract<T = any>({
@@ -873,206 +873,63 @@ export class SuperglueClient {
     }).then((data) => data.extract);
   }
 
-  async listRuns(
-    limit: number = 100,
-    offset: number = 0,
-    configId?: string,
-  ): Promise<{ items: Run[]; total: number }> {
-    const query = `
-        query ListRuns($limit: Int!, $offset: Int!, $configId: ID) {
-          listRuns(limit: $limit, offset: $offset, configId: $configId) {
-            items {
-              id
-              toolId
-              status
-              toolResult
-              stepResults {
-                stepId
-                success
-                error
-              }
-              error
-              startedAt
-              completedAt
-              toolConfig {
-                ${SuperglueClient.workflowQL}
-              }
-            }
-            total
-          }
-        }
-      `;
-    const response = await this.request<{ listRuns: { items: Run[]; total: number } }>(query, {
-      limit,
-      offset,
-      configId,
+  private mapOpenAPIRunToRun(openAPIRun: any): Run {
+    const statusMap: Record<string, RunStatus> = {
+      running: RunStatus.RUNNING,
+      success: RunStatus.SUCCESS,
+      failed: RunStatus.FAILED,
+      aborted: RunStatus.ABORTED,
+    };
+    return {
+      ...openAPIRun,
+      status: statusMap[openAPIRun.status] ?? RunStatus.FAILED,
+    } as Run;
+  }
+
+  async listRuns(options?: {
+    limit?: number;
+    page?: number;
+    toolId?: string;
+    status?: "running" | "success" | "failed" | "aborted";
+    requestSources?: ("api" | "frontend" | "scheduler" | "mcp" | "tool-chain" | "webhook")[];
+  }): Promise<{ items: Run[]; total: number; page: number; limit: number; hasMore: boolean }> {
+    const { limit = 100, page = 1, toolId, status, requestSources } = options ?? {};
+    const params = new URLSearchParams({
+      limit: String(limit),
+      page: String(page),
     });
-    return response.listRuns;
+    if (toolId) params.set("toolId", toolId);
+    if (status) params.set("status", status);
+    if (requestSources && requestSources.length > 0) {
+      params.set("requestSources", requestSources.join(","));
+    }
+
+    const response = await this.restRequest<{
+      data: any[];
+      total: number;
+      page: number;
+      limit: number;
+      hasMore: boolean;
+    }>("GET", `/v1/runs?${params.toString()}`);
+
+    return {
+      items: response.data.map((run) => this.mapOpenAPIRunToRun(run)),
+      total: response.total,
+      page: response.page,
+      limit: response.limit,
+      hasMore: response.hasMore,
+    };
   }
 
   async getRun(id: string): Promise<Run> {
-    const query = `
-        query GetRun($id: ID!) {
-          getRun(id: $id) {
-            id
-            toolId
-            status
-            toolResult
-            toolPayload
-            stepResults {
-              stepId
-              success
-              transformedData
-              error
-            }
-            options
-            error
-            startedAt
-            completedAt
-            toolConfig {
-              ${SuperglueClient.workflowQL}
-            }
-          }
-        }
-      `;
-    const response = await this.request<{ getRun: Run }>(query, { id });
-    const run = response.getRun;
-
-    if (run.stepResults) {
-      run.stepResults.forEach((stepResult: any) => {
-        stepResult.data = stepResult.transformedData;
-      });
-    }
-
-    return run;
-  }
-
-  async listApis(
-    limit: number = 10,
-    offset: number = 0,
-  ): Promise<{ items: ApiConfig[]; total: number }> {
-    const query = `
-        query ListApis($limit: Int!, $offset: Int!) {
-          listApis(limit: $limit, offset: $offset) {
-            items {
-              id
-              version
-              createdAt
-              updatedAt
-              urlHost
-              urlPath
-              instruction
-              method
-              queryParams
-              headers
-              body
-              documentationUrl
-              responseSchema
-              responseMapping
-              authentication
-              pagination {
-                type
-                pageSize
-                cursorPath
-                stopCondition
-              }
-              dataPath
-            }
-            total
-          }
-        }
-      `;
-    const response = await this.request<{ listApis: { items: ApiConfig[]; total: number } }>(
-      query,
-      { limit, offset },
-    );
-    return response.listApis;
-  }
-
-  async getApi(id: string): Promise<ApiConfig> {
-    const query = `
-        query GetApi($id: ID!) {
-          getApi(id: $id) {
-            id
-            version
-            createdAt
-            updatedAt
-            urlHost
-            urlPath
-            instruction
-            method
-            queryParams
-            headers
-            body
-            documentationUrl
-            responseSchema
-            responseMapping
-            authentication
-            pagination {
-              type
-              pageSize
-              cursorPath
-              stopCondition
-            }
-            dataPath
-          }
-        }
-      `;
-    const response = await this.request<{ getApi: ApiConfig }>(query, { id });
-    return response.getApi;
+    const response = await this.restRequest<any>("GET", `/v1/runs/${encodeURIComponent(id)}`);
+    return this.mapOpenAPIRunToRun(response);
   }
 
   async getWorkflow(id: string): Promise<Tool> {
     const query = `
         query GetWorkflow($id: ID!) {
-          getWorkflow(id: $id) {
-            id
-            version
-            createdAt
-            updatedAt
-            steps {
-              id
-              modify
-              apiConfig {
-                id
-                version
-                createdAt
-                updatedAt
-                urlHost
-                urlPath
-                instruction
-                method
-                queryParams
-                headers
-                body
-                documentationUrl
-                responseSchema
-                responseMapping
-                authentication
-                pagination {
-                  type
-                  pageSize
-                  cursorPath
-                  stopCondition
-                }
-                dataPath
-              }
-              integrationId
-              executionMode
-              loopSelector
-              loopMaxIters
-              inputMapping
-              responseMapping
-              failureBehavior
-            }
-            integrationIds
-            finalTransform
-            inputSchema
-            responseSchema
-            instruction
-            folder
-            archived
-          }
+          getWorkflow(id: $id) {${SuperglueClient.workflowQL}}
         }
       `;
     const response = await this.request<{ getWorkflow: Tool }>(query, { id });
@@ -1100,136 +957,6 @@ export class SuperglueClient {
       { limit, offset },
     );
     return response.listWorkflows;
-  }
-
-  async listWorkflowSchedules(workflowId?: string): Promise<ToolSchedule[]> {
-    const query = `
-        query ListWorkflowSchedules ($workflowId: String) {
-          listWorkflowSchedules(workflowId: $workflowId) {
-            ${SuperglueClient.workflowScheduleQL}
-          }
-        }
-      `;
-    const response = await this.request<{ listWorkflowSchedules: ToolSchedule[] }>(query, {
-      workflowId,
-    });
-    return response.listWorkflowSchedules;
-  }
-
-  async upsertWorkflowSchedule(schedule: ToolScheduleInput): Promise<ToolSchedule> {
-    const mutation = `
-        mutation UpsertWorkflowSchedule($schedule: WorkflowScheduleInput!) {
-          upsertWorkflowSchedule(schedule: $schedule) {
-            ${SuperglueClient.workflowScheduleQL}
-          }
-        }
-      `;
-    const response = await this.request<{ upsertWorkflowSchedule: ToolSchedule }>(mutation, {
-      schedule,
-    });
-    return response.upsertWorkflowSchedule;
-  }
-
-  async deleteWorkflowSchedule(id: string): Promise<boolean> {
-    const mutation = `
-        mutation DeleteWorkflowSchedule($id: ID!) {
-          deleteWorkflowSchedule(id: $id)
-        }
-      `;
-    const response = await this.request<{ deleteWorkflowSchedule: boolean }>(mutation, { id });
-    return response.deleteWorkflowSchedule;
-  }
-
-  async upsertApi(id: string, input: Partial<ApiConfig>): Promise<ApiConfig> {
-    const mutation = `
-        mutation UpsertApi($id: ID!, $input: JSON!) {
-          upsertApi(id: $id, input: $input) {
-            id
-            version
-            createdAt
-            updatedAt
-            urlHost
-            urlPath
-            instruction
-            method
-            queryParams
-            headers
-            body
-            documentationUrl
-            responseSchema
-            responseMapping
-            authentication
-            pagination {
-              type
-              pageSize
-              cursorPath
-              stopCondition
-            }
-            dataPath
-          }
-        }
-      `;
-    const response = await this.request<{ upsertApi: ApiConfig }>(mutation, { id, input });
-    return response.upsertApi;
-  }
-
-  async deleteApi(id: string): Promise<boolean> {
-    const mutation = `
-        mutation DeleteApi($id: ID!) {
-          deleteApi(id: $id)
-        }
-      `;
-    const response = await this.request<{ deleteApi: boolean }>(mutation, { id });
-    return response.deleteApi;
-  }
-
-  async updateApiConfigId(oldId: string, newId: string): Promise<ApiConfig> {
-    const mutation = `
-        mutation UpdateApiConfigId($oldId: ID!, $newId: ID!) {
-          updateApiConfigId(oldId: $oldId, newId: $newId) {
-            id
-            version
-            createdAt
-            updatedAt
-            urlHost
-            urlPath
-            instruction
-            method
-            queryParams
-            headers
-            body
-            documentationUrl
-            responseSchema
-            responseMapping
-            authentication
-            pagination {
-              type
-              pageSize
-              cursorPath
-              stopCondition
-            }
-            dataPath
-          }
-        }
-      `;
-    const response = await this.request<{ updateApiConfigId: ApiConfig }>(mutation, {
-      oldId,
-      newId,
-    });
-    return response.updateApiConfigId;
-  }
-
-  async generateSchema(instruction: string, responseData: string): Promise<any> {
-    const query = `
-        query GenerateSchema($instruction: String!, $responseData: String) {
-          generateSchema(instruction: $instruction, responseData: $responseData)
-        }
-      `;
-    const response = await this.request<{ generateSchema: string }>(query, {
-      instruction,
-      responseData,
-    });
-    return response.generateSchema;
   }
 
   async upsertWorkflow(id: string, input: Partial<Tool>): Promise<Tool> {
@@ -1266,72 +993,26 @@ export class SuperglueClient {
     );
   }
 
-  async listIntegrations(
+  async listSystems(
     limit: number = 10,
-    offset: number = 0,
-  ): Promise<{ items: Integration[]; total: number }> {
-    const query = `
-        query ListIntegrations($limit: Int!, $offset: Int!) {
-          listIntegrations(limit: $limit, offset: $offset) {
-            items {
-              id
-              name
-              type
-              urlHost
-              urlPath
-              credentials
-              documentationUrl
-              documentationPending
-              openApiSchema
-              openApiUrl
-              specificInstructions
-              documentationKeywords
-              icon
-              version
-              createdAt
-              updatedAt
-            }
-            total
-          }
-        }
-      `;
-    const response = await this.request<{
-      listIntegrations: { items: Integration[]; total: number };
-    }>(query, { limit, offset });
-    return response.listIntegrations;
-  }
-
-  async findRelevantIntegrations(searchTerms: string): Promise<Integration[]> {
-    const query = `
-        query FindRelevantIntegrations($searchTerms: String) {
-          findRelevantIntegrations(searchTerms: $searchTerms) {
-            reason
-            integration {
-              id
-              name
-              type
-              urlHost
-              urlPath
-              credentials
-              documentationUrl
-              documentation
-              documentationPending
-              openApiUrl
-              openApiSchema
-              specificInstructions
-              documentationKeywords
-              icon
-              version
-              createdAt
-              updatedAt
-            }
-          }
-        }
-      `;
-    const response = await this.request<{ findRelevantIntegrations: Integration[] }>(query, {
-      searchTerms,
+    page: number = 1,
+    options?: { includeDocs?: boolean },
+  ): Promise<{ items: System[]; total: number }> {
+    const params = new URLSearchParams({
+      limit: String(limit),
+      page: String(page),
     });
-    return response.findRelevantIntegrations;
+    if (options?.includeDocs) {
+      params.set("includeDocs", "true");
+    }
+    const response = await this.restRequest<{
+      success: boolean;
+      data: System[];
+      total: number;
+      page: number;
+      limit: number;
+    }>("GET", `/v1/systems?${params.toString()}`);
+    return { items: response.data, total: response.total };
   }
 
   async findRelevantTools(searchTerms?: string): Promise<SuggestedTool[]> {
@@ -1343,7 +1024,7 @@ export class SuperglueClient {
             inputSchema
             responseSchema
             steps {
-              integrationId
+              systemId
               instruction
             }
             reason
@@ -1356,43 +1037,24 @@ export class SuperglueClient {
     return response.findRelevantTools;
   }
 
-  async getIntegration(id: string): Promise<Integration> {
-    const query = `
-        query GetIntegration($id: ID!) {
-          getIntegration(id: $id) {
-            id
-            name
-            type
-            urlHost
-            urlPath
-            credentials
-            documentationUrl
-            documentation
-            documentationPending
-            openApiSchema
-            openApiUrl
-            specificInstructions
-            documentationKeywords
-            icon
-            version
-            createdAt
-            updatedAt
-          }
-        }
-      `;
-    const response = await this.request<{ getIntegration: Integration }>(query, { id });
-    return response.getIntegration;
+  async getSystem(id: string, options?: { includeDocs?: boolean }): Promise<System> {
+    const params = options?.includeDocs ? "?includeDocs=true" : "";
+    const response = await this.restRequest<{ success: boolean; data: System }>(
+      "GET",
+      `/v1/systems/${encodeURIComponent(id)}${params}`,
+    );
+    return response.data;
   }
 
-  async upsertIntegration(
+  async upsertSystem(
     id: string,
-    input: Partial<Integration>,
+    input: Partial<System>,
     mode: UpsertMode = UpsertMode.UPSERT,
     credentialMode?: CredentialMode,
-  ): Promise<Integration> {
+  ): Promise<System> {
     const mutation = `
-        mutation UpsertIntegration($input: IntegrationInput!, $mode: UpsertMode, $credentialMode: CredentialMode) {
-          upsertIntegration(input: $input, mode: $mode, credentialMode: $credentialMode) {
+        mutation UpsertSystem($input: SystemInput!, $mode: UpsertMode, $credentialMode: CredentialMode) {
+          upsertSystem(input: $input, mode: $mode, credentialMode: $credentialMode) {
             id
             name
             type
@@ -1407,29 +1069,31 @@ export class SuperglueClient {
             specificInstructions
             documentationKeywords
             icon
+            metadata
+            templateName
             version
             createdAt
             updatedAt
           }
         }
       `;
-    const integrationInput = { id, ...input };
-    const response = await this.request<{ upsertIntegration: Integration }>(mutation, {
-      input: integrationInput,
+    const systemInput = { id, ...input };
+    const response = await this.request<{ upsertSystem: System }>(mutation, {
+      input: systemInput,
       mode,
       credentialMode,
     });
-    return response.upsertIntegration;
+    return response.upsertSystem;
   }
 
-  async deleteIntegration(id: string): Promise<boolean> {
+  async deleteSystem(id: string): Promise<boolean> {
     const mutation = `
-        mutation DeleteIntegration($id: ID!) {
-          deleteIntegration(id: $id)
+        mutation DeleteSystem($id: ID!) {
+          deleteSystem(id: $id)
         }
       `;
-    const response = await this.request<{ deleteIntegration: boolean }>(mutation, { id });
-    return response.deleteIntegration;
+    const response = await this.request<{ deleteSystem: boolean }>(mutation, { id });
+    return response.deleteSystem;
   }
 
   async cacheOauthClientCredentials(args: {
@@ -1468,26 +1132,26 @@ export class SuperglueClient {
     return data.getOAuthClientCredentials;
   }
 
-  async searchIntegrationDocumentation(integrationId: string, keywords: string): Promise<string> {
-    const data = await this.graphQL<{ searchIntegrationDocumentation: string }>(
+  async searchSystemDocumentation(systemId: string, keywords: string): Promise<string> {
+    const data = await this.graphQL<{ searchSystemDocumentation: string }>(
       `
-            query SearchIntegrationDocumentation($integrationId: ID!, $keywords: String!) {
-                searchIntegrationDocumentation(integrationId: $integrationId, keywords: $keywords)
+            query SearchSystemDocumentation($systemId: ID!, $keywords: String!) {
+                searchSystemDocumentation(systemId: $systemId, keywords: $keywords)
             }
         `,
-      { integrationId, keywords },
+      { systemId, keywords },
     );
-    return data.searchIntegrationDocumentation;
+    return data.searchSystemDocumentation;
   }
 
-  async generateInstructions(integrations: any[]): Promise<string[]> {
+  async generateInstructions(systems: any[]): Promise<string[]> {
     const data = await this.graphQL<{ generateInstructions: string[] }>(
       `
-            query GenerateInstructions($integrations: [IntegrationInput!]!) {
-                generateInstructions(integrations: $integrations)
+            query GenerateInstructions($systems: [SystemInput!]!) {
+                generateInstructions(systems: $systems)
             }
         `,
-      { integrations },
+      { systems },
     );
 
     const instructions = data.generateInstructions;

@@ -29,6 +29,8 @@ import { Switch } from "@/src/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/src/components/ui/tabs";
 import { splitUrl } from "@/src/lib/client-utils";
 import { composeUrl } from "@/src/lib/general-utils";
+import { buildCategorizedSources } from "@/src/lib/templating-utils";
+import { ExecutionStep } from "@superglue/shared";
 import {
   Bug,
   ChevronDown,
@@ -42,7 +44,6 @@ import {
   Route,
   Square,
   Trash2,
-  Wand2,
 } from "lucide-react";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { JavaScriptCodeEditor } from "../../editors/JavaScriptCodeEditor";
@@ -51,18 +52,26 @@ import { TemplateAwareTextEditor } from "../../editors/TemplateAwareTextEditor";
 import { HelpTooltip } from "../../utils/HelpTooltip";
 import { useToolConfig, useExecution } from "../context";
 import { CopyButton } from "../shared/CopyButton";
-import { IntegrationSelector } from "../shared/IntegrationSelector";
+import { SystemSelector } from "../shared/SystemSelector";
 import { StepInputTab } from "./tabs/StepInputTab";
 import { StepResultTab } from "./tabs/StepResultTab";
+import { useRightSidebar } from "../../sidebar/RightSidebarContext";
+
+export interface StepItem {
+  type: "step";
+  data: ExecutionStep;
+  stepResult: any;
+  transformError: undefined;
+  categorizedSources: ReturnType<typeof buildCategorizedSources>;
+}
 
 interface SpotlightStepCardProps {
-  step: any;
+  step: ExecutionStep;
   stepIndex: number;
-  onEdit?: (stepId: string, updatedStep: any, isUserInitiated?: boolean) => void;
-  onRemove?: (stepId: string) => void;
+  onEdit?: (stepId: string, updatedStep: ExecutionStep, isUserInitiated?: boolean) => void;
+  onRemove?: () => void;
   onExecuteStep?: () => Promise<void>;
   onExecuteStepWithLimit?: (limit: number) => Promise<void>;
-  onOpenFixStepDialog?: () => void;
   onAbort?: () => void;
   isExecuting?: boolean;
   showOutputSignal?: number;
@@ -80,7 +89,6 @@ export const SpotlightStepCard = React.memo(
     onRemove,
     onExecuteStep,
     onExecuteStepWithLimit,
-    onOpenFixStepDialog,
     onAbort,
     isExecuting,
     showOutputSignal,
@@ -90,9 +98,10 @@ export const SpotlightStepCard = React.memo(
     isPayloadValid = true,
   }: SpotlightStepCardProps) => {
     // === CONSUME FROM CONTEXTS ===
-    const { integrations } = useToolConfig();
+    const { systems } = useToolConfig();
     const { isExecutingAny, getStepResult, isStepFailed, canExecuteStep, getDataSelectorResult } =
       useExecution();
+    const { sendMessageToAgent } = useRightSidebar();
 
     const isGlobalExecuting = isExecutingAny;
     const stepResult = getStepResult(step.id);
@@ -175,14 +184,14 @@ export const SpotlightStepCard = React.memo(
       [onEdit, onConfigEditingChange, step],
     );
 
-    const handleIntegrationChange = (value: string, selectedIntegration?: any) => {
+    const handleSystemChange = (value: string, selectedSystem?: any) => {
       handleImmediateEdit((s) => ({
         ...s,
-        integrationId: value,
+        systemId: value,
         apiConfig: {
           ...s.apiConfig,
-          urlHost: selectedIntegration?.urlHost || s.apiConfig.urlHost,
-          urlPath: selectedIntegration?.urlPath || s.apiConfig.urlPath,
+          urlHost: selectedSystem?.urlHost || s.apiConfig.urlHost,
+          urlPath: selectedSystem?.urlPath || s.apiConfig.urlPath,
         },
       }));
     };
@@ -212,6 +221,15 @@ export const SpotlightStepCard = React.memo(
         }));
       }
     };
+
+    const handleEditStepInstruction = useCallback(() => {
+      const instruction = step.apiConfig?.instruction || "";
+      const truncatedInstruction =
+        instruction.length > 300 ? `${instruction.slice(0, 300)}...` : instruction;
+      sendMessageToAgent(
+        `I want to edit step "${step.id}". The current instruction is:\n\n"${truncatedInstruction}"\n\nPlease help me modify this step.`,
+      );
+    }, [step.id, step.apiConfig?.instruction, sendMessageToAgent]);
 
     const handleRunStepClick = () => {
       if (isFirstStep && !isPayloadValid) {
@@ -304,31 +322,6 @@ export const SpotlightStepCard = React.memo(
                   )}
                 </div>
               )}
-              {onOpenFixStepDialog && (
-                <span
-                  title={
-                    !canExecute
-                      ? "Execute previous steps first"
-                      : isExecuting
-                        ? "Step is executing..."
-                        : "Fix this step with AI"
-                  }
-                >
-                  <div
-                    className={`relative flex rounded-md border border-input bg-background ${stepFailed ? "border-destructive/50" : ""}`}
-                  >
-                    <Button
-                      variant="ghost"
-                      onClick={onOpenFixStepDialog}
-                      disabled={!canExecute || isExecuting || isGlobalExecuting}
-                      className={`h-8 px-3 gap-2 border-0 ${stepFailed ? "bg-destructive/10 text-destructive hover:bg-destructive/20 hover:text-destructive animate-pulse" : ""}`}
-                    >
-                      <Wand2 className="h-3 w-3" />
-                      <span className="font-medium text-[13px]">Fix Step</span>
-                    </Button>
-                  </div>
-                </span>
-              )}
               {onRemove && (
                 <Button
                   variant="ghost"
@@ -385,17 +378,15 @@ export const SpotlightStepCard = React.memo(
                       </Label>
                       <div className="relative mt-1 rounded-lg border shadow-sm bg-muted/30">
                         <div className="absolute top-0 right-0 bottom-0 z-10 flex items-center gap-1 pl-2 pr-1 bg-gradient-to-l from-muted via-muted/90 to-muted/60">
-                          {onOpenFixStepDialog && (
-                            <button
-                              type="button"
-                              onClick={onOpenFixStepDialog}
-                              className="h-6 w-6 flex items-center justify-center rounded transition-colors hover:bg-muted/50"
-                              title="Fix this step with AI"
-                              aria-label="Fix this step with AI"
-                            >
-                              <Pencil className="h-3 w-3 text-muted-foreground" />
-                            </button>
-                          )}
+                          <button
+                            type="button"
+                            onClick={handleEditStepInstruction}
+                            className="h-6 w-6 flex items-center justify-center rounded transition-colors hover:bg-muted/50"
+                            title="Edit this step with AI"
+                            aria-label="Edit this step with AI"
+                          >
+                            <Pencil className="h-3 w-3 text-muted-foreground" />
+                          </button>
                           <CopyButton text={step.apiConfig.instruction || ""} />
                         </div>
                         <div className="h-9 flex items-center text-xs text-muted-foreground px-3 pr-16 truncate">
@@ -410,13 +401,13 @@ export const SpotlightStepCard = React.memo(
                     <div className="flex gap-2">
                       <div className="flex-1">
                         <Label className="text-xs flex items-center gap-1">
-                          Integration
-                          <HelpTooltip text="Select an integration to link this step to. This will pre-fill the API configuration with the integration's base URL and credentials." />
+                          System
+                          <HelpTooltip text="Select an system to link this step to. This will pre-fill the API configuration with the system's base URL and credentials." />
                         </Label>
                         <div className="rounded-lg border shadow-sm bg-muted/30 mt-1">
-                          <IntegrationSelector
-                            value={step.integrationId || ""}
-                            onValueChange={handleIntegrationChange}
+                          <SystemSelector
+                            value={step.systemId || ""}
+                            onValueChange={handleSystemChange}
                             triggerClassName="h-9 border-0 bg-transparent shadow-none"
                           />
                         </div>
@@ -815,7 +806,7 @@ export const SpotlightStepCard = React.memo(
               <AlertDialogAction
                 onClick={() => {
                   setShowDeleteConfirm(false);
-                  onRemove?.(step.id);
+                  onRemove?.();
                 }}
                 className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               >

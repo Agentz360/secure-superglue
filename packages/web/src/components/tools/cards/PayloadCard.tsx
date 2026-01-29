@@ -4,17 +4,21 @@ import { Card } from "@/src/components/ui/card";
 import { FileChip } from "@/src/components/ui/FileChip";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/src/components/ui/tabs";
 import { HelpTooltip } from "@/src/components/utils/HelpTooltip";
-import {
-  formatBytes,
-  isAllowedFileType,
-  MAX_TOTAL_FILE_SIZE_TOOLS,
-  type UploadedFileInfo,
-} from "@/src/lib/file-utils";
+import { formatBytes, isAllowedFileType, MAX_TOTAL_FILE_SIZE_TOOLS } from "@/src/lib/file-utils";
+import { buildCategorizedSources } from "@/src/lib/templating-utils";
 import { ALLOWED_FILE_EXTENSIONS } from "@superglue/shared";
 import { FileBraces, FileBracesCorner, FileJson, Upload } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
 import { JsonCodeEditor } from "../../editors/JsonCodeEditor";
 import { useToolConfig } from "../context";
+
+export interface PayloadItem {
+  type: "payload";
+  data: { payloadText: string; inputSchema: string | null };
+  stepResult: undefined;
+  transformError: undefined;
+  categorizedSources: ReturnType<typeof buildCategorizedSources>;
+}
 
 interface PayloadSpotlightProps {
   onFilesUpload?: (files: File[]) => Promise<void>;
@@ -31,7 +35,7 @@ export const PayloadSpotlight = ({
   totalFileSize = 0,
   isPayloadValid,
 }: PayloadSpotlightProps) => {
-  const { payload, inputSchema, setPayloadText, setInputSchema, markPayloadEdited } =
+  const { tool, payload, inputSchema, setPayloadText, setInputSchema, markPayloadEdited } =
     useToolConfig();
 
   const payloadText = payload.manualPayloadText;
@@ -41,6 +45,40 @@ export const PayloadSpotlight = ({
   const [localInputSchema, setLocalInputSchema] = useState(inputSchema || null);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Save payload to localStorage whenever it changes (debounced)
+  useEffect(() => {
+    if (!tool.id) return;
+
+    const STORAGE_KEY = `superglue-payload:${tool.id}`;
+    const MAX_PAYLOAD_SIZE = 100 * 1024; // Only cache small payloads (100KB)
+    const DEBOUNCE_MS = 500;
+
+    const timeoutId = setTimeout(() => {
+      try {
+        const trimmed = (payloadText || "").trim();
+        if (trimmed === "") {
+          localStorage.removeItem(STORAGE_KEY);
+          return;
+        }
+
+        const payloadSize = new Blob([payloadText]).size;
+
+        if (payloadSize > MAX_PAYLOAD_SIZE) {
+          localStorage.removeItem(STORAGE_KEY);
+          return;
+        }
+
+        localStorage.setItem(STORAGE_KEY, payloadText);
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "QuotaExceededError") {
+          localStorage.removeItem(STORAGE_KEY);
+        }
+      }
+    }, DEBOUNCE_MS);
+
+    return () => clearTimeout(timeoutId);
+  }, [tool.id, payloadText]);
 
   useEffect(() => {
     setLocalPayload(payloadText || "");
@@ -126,7 +164,7 @@ export const PayloadSpotlight = ({
             value="payload"
             className="h-full px-3 text-xs flex items-center gap-1 rounded-sm data-[state=active]:rounded-sm"
           >
-            <FileJson className="h-4 w-4" /> Payload
+            <FileJson className="h-4 w-4" /> Test Payload
           </TabsTrigger>
           {isPayloadValid && (
             <TabsTrigger
@@ -164,16 +202,50 @@ export const PayloadSpotlight = ({
           <span className="text-xs text-muted-foreground">
             Enter your inputs here manually, or upload files to autofill missing JSON fields.
           </span>
-          <div>
-            <JsonCodeEditor
-              value={localPayload}
-              onChange={(val) => handlePayloadChange(val || "")}
-              readOnly={false}
-              maxHeight="300px"
-              resizable={true}
-              showValidation={true}
-            />
-          </div>
+          {uploadedFiles.length > 0 ? (
+            <div className="flex gap-3">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-xs font-medium text-muted-foreground">Manual Payload</span>
+                  <HelpTooltip text="Edit your manual JSON input here. This will be merged with file data." />
+                </div>
+                <JsonCodeEditor
+                  value={localPayload}
+                  onChange={(val) => handlePayloadChange(val || "")}
+                  readOnly={false}
+                  maxHeight="250px"
+                  resizable={true}
+                  showValidation={true}
+                />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-xs font-medium text-muted-foreground">
+                    Merged Payload (Read-only)
+                  </span>
+                  <HelpTooltip text="This is the final payload that will be sent when the tool executes, combining your manual input with parsed file data." />
+                </div>
+                <JsonCodeEditor
+                  value={JSON.stringify(payload.computedPayload, null, 2)}
+                  readOnly={true}
+                  maxHeight="250px"
+                  resizable={true}
+                  showValidation={false}
+                />
+              </div>
+            </div>
+          ) : (
+            <div>
+              <JsonCodeEditor
+                value={localPayload}
+                onChange={(val) => handlePayloadChange(val || "")}
+                readOnly={false}
+                maxHeight="300px"
+                resizable={true}
+                showValidation={true}
+              />
+            </div>
+          )}
           {onFilesUpload && (
             <div className="pt-3 border-t border-border/50 space-y-3">
               <div className="flex flex-col items-center gap-2">

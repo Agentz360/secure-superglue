@@ -6,7 +6,7 @@ import { tokenRegistry } from "@/src/lib/token-registry";
 interface GenerateStepConfigParams {
   currentStepConfig?: any;
   stepInput?: Record<string, any>;
-  integrationId?: string;
+  systemId?: string;
   credentials?: Record<string, string>;
   errorMessage?: string;
 }
@@ -24,12 +24,13 @@ export function useGenerateStepConfig() {
       const client = new SuperglueClient({
         endpoint: config.superglueEndpoint,
         apiKey: tokenRegistry.getToken(),
+        apiEndpoint: config.apiEndpoint,
       });
 
       const result: { config: ApiConfig; dataSelector: string } = await client.generateStepConfig({
         currentStepConfig: params.currentStepConfig,
         stepInput: params.stepInput,
-        integrationId: params.integrationId,
+        systemId: params.systemId,
         credentials: params.credentials,
         errorMessage: params.errorMessage,
       });

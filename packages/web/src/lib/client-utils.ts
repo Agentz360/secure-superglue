@@ -1,10 +1,4 @@
-import {
-  ExecutionStep,
-  Integration,
-  SelfHealingMode,
-  SuperglueClient,
-  Tool,
-} from "@superglue/shared";
+import { ExecutionStep, System, ResponseFilter, SuperglueClient, Tool } from "@superglue/shared";
 import { isAbortError } from "./general-utils";
 import { tokenRegistry } from "./token-registry";
 
@@ -72,10 +66,10 @@ export async function abortExecution(
   if (!runId) return false;
 
   try {
-    const result = await client.abortToolExecution(runId);
+    const result = await client.abortStep(runId);
     return result.success;
   } catch (error) {
-    console.error("Failed to abort execution:", error);
+    console.error("Failed to abort step:", error);
     return false;
   }
 }
@@ -104,35 +98,23 @@ export async function executeSingleStep({
   }
 
   try {
-    const singleStepTool: Tool = {
-      id: `${toolId}_step_${step.id}`,
-      steps: [step],
-      finalTransform: "",
-    } as any;
-
-    const executionPayload = {
-      ...payload,
-      ...previousResults,
-    };
-
-    const result = await client.executeWorkflow({
-      tool: singleStepTool,
-      payload: executionPayload,
+    // Use the new REST endpoint that doesn't create a run
+    const result = await client.executeStep({
+      step,
+      payload,
+      previousResults,
       options: {
-        testMode: selfHealing,
-        selfHealing: selfHealing ? SelfHealingMode.REQUEST_ONLY : SelfHealingMode.DISABLED,
+        selfHealing,
       },
       runId: stepRunId,
     });
 
-    const stepResult = result.stepResults[0];
-
     return {
       stepId: step.id,
       success: result.success,
-      data: stepResult.data,
+      data: result.data,
       error: result.error,
-      updatedStep: result.config?.steps?.[0],
+      updatedStep: result.updatedStep,
       runId: stepRunId,
     };
   } catch (error: any) {
@@ -223,7 +205,7 @@ export async function executeToolStepByStep(
     }
   }
 
-  if (tool.finalTransform && state.failedSteps.length === 0) {
+  if ((tool.finalTransform || tool.responseFilters?.length) && state.failedSteps.length === 0) {
     const finalResult = await executeFinalTransform(
       client,
       tool.id || "tool",
@@ -234,6 +216,7 @@ export async function executeToolStepByStep(
       previousResults,
       selfHealing,
       onStepRunIdChange,
+      tool.responseFilters,
     );
 
     state.stepResults["__final_transform__"] = {
@@ -275,6 +258,7 @@ export async function executeFinalTransform(
   previousResults: Record<string, any>,
   selfHealing: boolean = false,
   onRunIdGenerated?: (runId: string) => void,
+  responseFilters?: ResponseFilter[],
 ): Promise<FinalTransformExecutionResult> {
   const transformRunId = generateUUID();
 
@@ -283,31 +267,26 @@ export async function executeFinalTransform(
   }
 
   try {
-    const finalPayload = {
-      ...payload,
-      ...previousResults,
-    };
-    const result = await client.executeWorkflow({
-      tool: {
-        id: `${toolId}_final_transform`,
-        steps: [],
-        finalTransform,
-        responseSchema,
-        inputSchema: inputSchema,
-      },
-      payload: finalPayload,
+    // Use the new REST endpoint that doesn't create a run
+    const result = await client.executeTransformOnly({
+      finalTransform,
+      responseSchema,
+      inputSchema,
+      payload,
+      stepResults: previousResults,
+      responseFilters,
       options: {
-        testMode: selfHealing,
-        selfHealing: selfHealing ? SelfHealingMode.TRANSFORM_ONLY : SelfHealingMode.DISABLED,
+        selfHealing,
       },
       runId: transformRunId,
     });
+
     return {
       success: result.success,
       data: result.data,
       error: result.error,
-      updatedTransform: result.config?.finalTransform,
-      updatedResponseSchema: result.config?.responseSchema,
+      updatedTransform: result.updatedTransform,
+      updatedResponseSchema: result.updatedResponseSchema,
       runId: transformRunId,
     };
   } catch (error: any) {
@@ -408,25 +387,22 @@ export const splitUrl = (url: string) => {
   };
 };
 
-export function needsUIToTriggerDocFetch(
-  newIntegration: Integration,
-  oldIntegration: Integration | null,
-): boolean {
+export function needsUIToTriggerDocFetch(newSystem: System, oldSystem: System | null): boolean {
   // If documentation was manually provided, no fetch needed.
-  if (newIntegration.documentation && newIntegration.documentation.trim()) {
+  if (newSystem.documentation && newSystem.documentation.trim()) {
     return false;
   }
 
-  // If it's a new integration with a doc URL, fetch is needed.
-  if (!oldIntegration) {
+  // If it's a new system with a doc URL, fetch is needed.
+  if (!oldSystem) {
     return true;
   }
 
   // If any of the relevant URLs have changed, fetch is needed.
   if (
-    newIntegration.urlHost !== oldIntegration.urlHost ||
-    newIntegration.urlPath !== oldIntegration.urlPath ||
-    newIntegration.documentationUrl !== oldIntegration.documentationUrl
+    newSystem.urlHost !== oldSystem.urlHost ||
+    newSystem.urlPath !== oldSystem.urlPath ||
+    newSystem.documentationUrl !== oldSystem.documentationUrl
   ) {
     return true;
   }
@@ -485,9 +461,10 @@ export function generateUUID(): string {
   });
 }
 
-export function createSuperglueClient(endpoint: string): SuperglueClient {
+export function createSuperglueClient(endpoint: string, apiEndpoint?: string): SuperglueClient {
   return new SuperglueClient({
     endpoint,
     apiKey: tokenRegistry.getToken(),
+    apiEndpoint,
   });
 }

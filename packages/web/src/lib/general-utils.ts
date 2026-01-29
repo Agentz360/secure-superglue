@@ -1,4 +1,4 @@
-import { assertValidArrowFunction, findMatchingIntegration, integrations } from "@superglue/shared";
+import { assertValidArrowFunction, findTemplateForSystem } from "@superglue/shared";
 import { clsx, type ClassValue } from "clsx";
 import prettierPluginBabel from "prettier/plugins/babel";
 import prettierPluginEstree from "prettier/plugins/estree";
@@ -49,6 +49,26 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+/**
+ * Safe JSON.stringify that handles circular references, BigInt, and other edge cases.
+ * Falls back to String(obj) on error.
+ */
+export function safeStringify(obj: any, indent?: number): string {
+  try {
+    return JSON.stringify(
+      obj,
+      (_, value) => {
+        if (typeof value === "bigint") return value.toString();
+        if (typeof value === "function") return "[Function]";
+        return value;
+      },
+      indent,
+    );
+  } catch {
+    return String(obj);
+  }
+}
+
 export function composeUrl(host: string, path: string | undefined) {
   if (!host && !path) return "";
   // Handle empty/undefined inputs
@@ -60,29 +80,6 @@ export function composeUrl(host: string, path: string | undefined) {
   const cleanPath = path.startsWith("/") ? path.slice(1) : path;
 
   return `${cleanHost}/${cleanPath}`;
-}
-
-export function getIntegrationIcon(integration: { id: string; urlHost?: string }): string | null {
-  // First try exact ID match with known integrations
-  if (integrations[integration.id]) {
-    return integrations[integration.id].icon;
-  }
-
-  // Second try: strip any numeric suffix (e.g., "firebase-1" -> "firebase")
-  const baseId = integration.id.replace(/-\d+$/, "");
-  if (baseId !== integration.id && integrations[baseId]) {
-    return integrations[baseId].icon;
-  }
-
-  // Finally try using the proper regex-based matching
-  if (integration.urlHost) {
-    const match = findMatchingIntegration(integration.urlHost);
-    if (match) {
-      return match.integration.icon;
-    }
-  }
-
-  return null;
 }
 
 export const isEmptyData = (value: any): boolean => {
@@ -254,6 +251,62 @@ export function getSimpleIcon(name: string): SimpleIcon | null {
   }
 }
 
+// Resolved icon type - either a SimpleIcon or a Lucide icon name
+export type ResolvedIcon =
+  | { type: "simpleicons"; icon: SimpleIcon }
+  | { type: "lucide"; name: string }
+  | null;
+
+/**
+ * Resolve a system's icon to a renderable format.
+ * Handles:
+ * - New format: "simpleicons:salesforce" or "lucide:database"
+ * - Legacy format: "salesforce" (assumes simpleicons)
+ * - Fallback to template matching by system id/urlHost
+ */
+export function resolveSystemIcon(system: {
+  id?: string;
+  urlHost?: string;
+  icon?: string | null;
+  templateName?: string;
+}): ResolvedIcon {
+  // First, try the system's own icon field
+  if (system.icon) {
+    const colonIndex = system.icon.indexOf(":");
+    if (colonIndex !== -1) {
+      // New prefixed format
+      const source = system.icon.substring(0, colonIndex);
+      const name = system.icon.substring(colonIndex + 1);
+
+      if (source === "lucide") {
+        return { type: "lucide", name };
+      }
+      // simpleicons or unknown source - try to resolve
+      const simpleIcon = getSimpleIcon(name);
+      if (simpleIcon) {
+        return { type: "simpleicons", icon: simpleIcon };
+      }
+    } else {
+      // Legacy format - no prefix, assume simpleicons
+      const simpleIcon = getSimpleIcon(system.icon);
+      if (simpleIcon) {
+        return { type: "simpleicons", icon: simpleIcon };
+      }
+    }
+  }
+
+  // Fallback: try to get icon from templates via findTemplateForSystem
+  const match = findTemplateForSystem(system);
+  if (match?.template.icon) {
+    const simpleIcon = getSimpleIcon(match.template.icon);
+    if (simpleIcon) {
+      return { type: "simpleicons", icon: simpleIcon };
+    }
+  }
+
+  return null;
+}
+
 // Computes the execution-ready payload by merging manual JSON with file payloads
 export const computeToolPayload = (
   manualPayloadText: string,
@@ -398,6 +451,19 @@ export function isAbortError(errorMessage: string | undefined): boolean {
   if (!errorMessage) return false;
   const lower = errorMessage.toLowerCase();
   return lower.includes("abort") || lower.includes("terminated") || lower.includes("cancelled");
+}
+
+export function formatDurationShort(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  if (ms < 3600000) {
+    const mins = Math.floor(ms / 60000);
+    const secs = Math.round((ms % 60000) / 1000);
+    return `${mins}m ${secs}s`;
+  }
+  const hours = Math.floor(ms / 3600000);
+  const mins = Math.floor((ms % 3600000) / 60000);
+  return `${hours}h ${mins}m`;
 }
 
 export const handleCopyCode = async (code: string): Promise<boolean> => {

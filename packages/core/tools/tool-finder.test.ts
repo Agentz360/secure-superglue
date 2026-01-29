@@ -22,7 +22,7 @@ describe("ToolFinder", () => {
         steps: [
           {
             id: "step-1",
-            integrationId: "gmail",
+            systemId: "gmail",
             apiConfig: {
               id: "step-1",
               instruction: "Send email via Gmail API",
@@ -30,7 +30,6 @@ describe("ToolFinder", () => {
               urlHost: "https://gmail.googleapis.com",
               urlPath: "/send",
             },
-            responseMapping: "$",
           },
         ],
       },
@@ -40,7 +39,7 @@ describe("ToolFinder", () => {
         steps: [
           {
             id: "step-1",
-            integrationId: "postgres",
+            systemId: "postgres",
             apiConfig: {
               id: "step-1",
               instruction: "Query users table",
@@ -48,7 +47,6 @@ describe("ToolFinder", () => {
               urlHost: "https://db.example.com",
               urlPath: "/users",
             },
-            responseMapping: "$",
           },
         ],
       },
@@ -58,7 +56,7 @@ describe("ToolFinder", () => {
         steps: [
           {
             id: "step-1",
-            integrationId: "slack",
+            systemId: "slack",
             apiConfig: {
               id: "step-1",
               instruction: "Post message to Slack",
@@ -66,7 +64,6 @@ describe("ToolFinder", () => {
               urlHost: "https://slack.com",
               urlPath: "/api/chat.postMessage",
             },
-            responseMapping: "$",
           },
         ],
       },
@@ -76,7 +73,7 @@ describe("ToolFinder", () => {
         steps: [
           {
             id: "step-1",
-            integrationId: "github",
+            systemId: "github",
             apiConfig: {
               id: "step-1",
               instruction: "Create GitHub issue",
@@ -84,7 +81,6 @@ describe("ToolFinder", () => {
               urlHost: "https://api.github.com",
               urlPath: "/repos/owner/repo/issues",
             },
-            responseMapping: "$",
           },
         ],
       },
@@ -97,11 +93,6 @@ describe("ToolFinder", () => {
 
       expect(results).toHaveLength(4);
       expect(results.every((r) => r.reason === "Available tool")).toBe(true);
-      expect(logs.logMessage).toHaveBeenCalledWith(
-        "info",
-        "No specific query provided, returning all available tools.",
-        expect.any(Object),
-      );
     });
 
     it("should return all tools when query is empty string", async () => {
@@ -129,11 +120,6 @@ describe("ToolFinder", () => {
       const results = await toolFinder.findTools("email", []);
 
       expect(results).toHaveLength(0);
-      expect(logs.logMessage).toHaveBeenCalledWith(
-        "info",
-        "No tools available for selection.",
-        expect.any(Object),
-      );
     });
 
     it("should find tools by keyword in tool ID", async () => {
@@ -152,7 +138,7 @@ describe("ToolFinder", () => {
       expect(results[0].reason).toContain("Matched keywords: slack");
     });
 
-    it("should find tools by keyword in integration ID", async () => {
+    it("should find tools by keyword in system ID", async () => {
       const results = await toolFinder.findTools("github", mockTools);
 
       expect(results.length).toBeGreaterThan(0);
@@ -215,7 +201,7 @@ describe("ToolFinder", () => {
         responseSchema: undefined,
         steps: [
           {
-            integrationId: "gmail",
+            systemId: "gmail",
             instruction: "Send email via Gmail API",
           },
         ],
@@ -230,7 +216,7 @@ describe("ToolFinder", () => {
         steps: [
           {
             id: "step-1",
-            integrationId: "github",
+            systemId: "github",
             apiConfig: {
               id: "step-1",
               instruction: "Fetch GitHub data",
@@ -238,11 +224,10 @@ describe("ToolFinder", () => {
               urlHost: "https://api.github.com",
               urlPath: "/repos",
             },
-            responseMapping: "$",
           },
           {
             id: "step-2",
-            integrationId: "slack",
+            systemId: "slack",
             apiConfig: {
               id: "step-2",
               instruction: "Send notification to Slack",
@@ -250,7 +235,6 @@ describe("ToolFinder", () => {
               urlHost: "https://slack.com",
               urlPath: "/api/chat.postMessage",
             },
-            responseMapping: "$",
           },
         ],
       };
@@ -265,7 +249,7 @@ describe("ToolFinder", () => {
       expect(complexResult?.reason).toContain("slack");
     });
 
-    it("should handle tools without integration IDs", async () => {
+    it("should handle tools without system IDs", async () => {
       const simpleWorkflow: Tool = {
         id: "simple-http-call",
         instruction: "Make a simple HTTP call",
@@ -279,7 +263,6 @@ describe("ToolFinder", () => {
               urlHost: "https://api.example.com",
               urlPath: "/data",
             },
-            responseMapping: "$",
           },
         ],
       };
@@ -288,7 +271,7 @@ describe("ToolFinder", () => {
 
       expect(results).toHaveLength(1);
       expect(results[0].id).toBe("simple-http-call");
-      expect(results[0].steps[0].integrationId).toBeUndefined();
+      expect(results[0].steps[0].systemId).toBeUndefined();
     });
 
     it("should trim and filter empty keywords", async () => {
@@ -312,7 +295,7 @@ describe("ToolFinder", () => {
         steps: [
           {
             id: "step-1",
-            integrationId: "notification-service",
+            systemId: "notification-service",
             apiConfig: {
               id: "step-1",
               instruction: "Send alert via notification system",
@@ -320,7 +303,6 @@ describe("ToolFinder", () => {
               urlHost: "https://api.notification.com",
               urlPath: "/send",
             },
-            responseMapping: "$",
           },
         ],
       };
@@ -338,7 +320,6 @@ describe("ToolFinder", () => {
               urlHost: "https://api.example.com",
               urlPath: "/process",
             },
-            responseMapping: "$",
           },
         ],
       };
@@ -365,7 +346,7 @@ describe("ToolFinder", () => {
         steps: [
           {
             id: "step-1",
-            integrationId: "test-integration",
+            systemId: "test-system",
             apiConfig: {
               id: "step-1",
               instruction: "Do something",
@@ -373,7 +354,6 @@ describe("ToolFinder", () => {
               urlHost: "https://api.example.com",
               urlPath: "/test",
             },
-            responseMapping: "$",
           },
         ],
       };
@@ -406,9 +386,8 @@ describe("ToolFinder", () => {
         steps: [
           {
             id: "step-1",
-            integrationId: "test",
+            systemId: "test",
             apiConfig: null as any,
-            responseMapping: "$",
           },
         ],
       };
@@ -426,7 +405,7 @@ describe("ToolFinder", () => {
         steps: [
           {
             id: "step-1",
-            integrationId: "test",
+            systemId: "test",
             apiConfig: {
               id: "step-1",
               method: HttpMethod.GET,
@@ -456,7 +435,6 @@ describe("ToolFinder", () => {
               urlHost: "https://api.example.com",
               urlPath: "/process",
             },
-            responseMapping: "$",
           },
         ],
       };
@@ -493,7 +471,6 @@ describe("ToolFinder", () => {
               urlHost: "https://api.example.com",
               urlPath: "/send",
             },
-            responseMapping: "$",
           },
         ],
       };
@@ -519,7 +496,6 @@ describe("ToolFinder", () => {
               urlHost: "https://api.example.com",
               urlPath: "/match",
             },
-            responseMapping: "$",
           },
         ],
       };
@@ -539,7 +515,7 @@ describe("ToolFinder", () => {
         steps: [
           {
             id: "step-1",
-            integrationId: null as any,
+            systemId: null as any,
             apiConfig: {
               id: "step-1",
               instruction: null as any,
@@ -547,7 +523,6 @@ describe("ToolFinder", () => {
               urlHost: "https://api.example.com",
               urlPath: "/test",
             },
-            responseMapping: "$",
           },
         ],
       };
@@ -574,7 +549,6 @@ describe("ToolFinder", () => {
               urlHost: "https://api.example.com",
               urlPath: "/test",
             },
-            responseMapping: "$",
           },
         ],
       };
@@ -585,14 +559,14 @@ describe("ToolFinder", () => {
       expect(results[0].id).toBe("long-text-tool");
     });
 
-    it("should handle empty string in step integrationId", async () => {
-      const toolWithEmptyIntegrationId: Tool = {
-        id: "empty-integration-id",
-        instruction: "Tool with empty integration ID",
+    it("should handle empty string in step systemId", async () => {
+      const toolWithEmptySystemId: Tool = {
+        id: "empty-system-id",
+        instruction: "Tool with empty system ID",
         steps: [
           {
             id: "step-1",
-            integrationId: "",
+            systemId: "",
             apiConfig: {
               id: "step-1",
               instruction: "Do something",
@@ -600,15 +574,14 @@ describe("ToolFinder", () => {
               urlHost: "https://api.example.com",
               urlPath: "/test",
             },
-            responseMapping: "$",
           },
         ],
       };
 
-      const results = await toolFinder.findTools("empty", [toolWithEmptyIntegrationId]);
+      const results = await toolFinder.findTools("empty", [toolWithEmptySystemId]);
 
       expect(results).toHaveLength(1);
-      expect(results[0].steps[0].integrationId).toBe("");
+      expect(results[0].steps[0].systemId).toBe("");
     });
 
     it("should handle query with only numbers", async () => {
@@ -664,7 +637,6 @@ describe("ToolFinder", () => {
               urlHost: "https://api.example.com",
               urlPath: "/process",
             },
-            responseMapping: "$",
           },
         ],
       };
@@ -690,7 +662,6 @@ describe("ToolFinder", () => {
               urlHost: "https://api.example.com",
               urlPath: "/test",
             },
-            responseMapping: "$",
           },
         ],
       };
@@ -708,7 +679,6 @@ describe("ToolFinder", () => {
               urlHost: "https://api.example.com",
               urlPath: "/test",
             },
-            responseMapping: "$",
           },
         ],
       };
@@ -726,7 +696,6 @@ describe("ToolFinder", () => {
               urlHost: "https://api.example.com",
               urlPath: "/test",
             },
-            responseMapping: "$",
           },
         ],
       };
@@ -776,7 +745,6 @@ describe("ToolFinder", () => {
                 urlHost: "https://api.example.com",
                 urlPath: `/test/${i}`,
               },
-              responseMapping: "$",
             },
           ],
         });

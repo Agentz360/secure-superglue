@@ -3,13 +3,15 @@ import {
   DiscoveryRun,
   FileReference,
   FileStatus,
-  Integration,
+  RequestSource,
+  System,
   Run,
   RunStatus,
   Tool,
 } from "@superglue/shared";
 import { createHash } from "node:crypto";
-import type { DataStore, ToolScheduleInternal } from "./types.js";
+import { normalizeTool } from "./migrations/migration.js";
+import type { DataStore, PrometheusRunMetrics, ToolScheduleInternal } from "./types.js";
 
 export class MemoryStore implements DataStore {
   private storage: {
@@ -17,8 +19,8 @@ export class MemoryStore implements DataStore {
     runs: Map<string, Run>;
     runsIndex: Map<string, { id: string; timestamp: number; configId: string }[]>;
     workflows: Map<string, Tool>;
-    workflowSchedules: Map<string, ToolScheduleInternal>;
-    integrations: Map<string, Integration>;
+    toolSchedules: Map<string, ToolScheduleInternal>;
+    systems: Map<string, System>;
     discoveryRuns: Map<string, DiscoveryRun>;
     fileReferences: Map<string, FileReference>;
   };
@@ -34,8 +36,8 @@ export class MemoryStore implements DataStore {
       runs: new Map(),
       runsIndex: new Map(),
       workflows: new Map(),
-      workflowSchedules: new Map(),
-      integrations: new Map(),
+      toolSchedules: new Map(),
+      systems: new Map(),
       discoveryRuns: new Map(),
       fileReferences: new Map(),
     };
@@ -100,27 +102,27 @@ export class MemoryStore implements DataStore {
     if (!id) return null;
     const key = this.getKey("run", id, orgId);
     const run = this.storage.runs.get(key);
-    return run ? { ...run, id } : null;
+    return run ? { ...run, runId: id } : null;
   }
 
-  async createRun(params: { run: Run }): Promise<Run> {
-    const { run } = params;
+  async createRun(params: { run: Run; orgId?: string }): Promise<Run> {
+    const { run, orgId } = params;
     if (!run) throw new Error("Run is required");
-    const key = this.getKey("run", run.id, run.orgId);
+    const key = this.getKey("run", run.runId, orgId);
 
     if (this.storage.runs.has(key)) {
-      throw new Error(`Run with id ${run.id} already exists`);
+      throw new Error(`Run with id ${run.runId} already exists`);
     }
 
     this.storage.runs.set(key, run);
 
-    const toolId = run.toolId || run.toolConfig?.id;
+    const toolId = run.toolId || run.tool?.id;
     if (toolId) {
-      const indexKey = this.getKey("index", toolId, run.orgId);
+      const indexKey = this.getKey("index", toolId, orgId);
       const existing = this.storage.runsIndex.get(indexKey) || [];
       existing.push({
-        id: run.id,
-        timestamp: run.startedAt ? run.startedAt.getTime() : Date.now(),
+        id: run.runId,
+        timestamp: new Date(run.metadata.startedAt).getTime(),
         configId: toolId,
       });
       this.storage.runsIndex.set(indexKey, existing);
@@ -141,8 +143,11 @@ export class MemoryStore implements DataStore {
     const updatedRun: Run = {
       ...existingRun,
       ...updates,
-      id,
-      orgId,
+      runId: id,
+      metadata: {
+        ...existingRun.metadata,
+        ...updates.metadata,
+      },
     };
 
     this.storage.runs.set(key, updatedRun);
@@ -154,16 +159,19 @@ export class MemoryStore implements DataStore {
     offset?: number;
     configId?: string;
     status?: RunStatus;
+    requestSources?: RequestSource[];
     orgId?: string;
   }): Promise<{ items: Run[]; total: number }> {
-    const { limit = 10, offset = 0, configId, status, orgId } = params || {};
+    const { limit = 10, offset = 0, configId, status, requestSources, orgId } = params || {};
     const allRuns = this.getOrgItems(this.storage.runs, "run", orgId);
 
-    const validRuns = allRuns.filter((run): run is Run => run !== null && !!run.id);
+    const validRuns = allRuns.filter(
+      (run): run is Run => run !== null && !!run.runId && !!run.metadata?.startedAt,
+    );
 
     validRuns.sort((a, b) => {
-      const aTime = a.startedAt instanceof Date ? a.startedAt.getTime() : 0;
-      const bTime = b.startedAt instanceof Date ? b.startedAt.getTime() : 0;
+      const aTime = new Date(a.metadata.startedAt).getTime();
+      const bTime = new Date(b.metadata.startedAt).getTime();
       return bTime - aTime;
     });
 
@@ -171,7 +179,7 @@ export class MemoryStore implements DataStore {
 
     if (configId) {
       filteredRuns = filteredRuns.filter((run) => {
-        const toolId = run.toolId || run.toolConfig?.id;
+        const toolId = run.toolId || run.tool?.id;
         return toolId === configId;
       });
     }
@@ -180,8 +188,22 @@ export class MemoryStore implements DataStore {
       filteredRuns = filteredRuns.filter((run) => run.status === status);
     }
 
+    if (requestSources !== undefined && requestSources.length > 0) {
+      filteredRuns = filteredRuns.filter(
+        (run) => run.requestSource && requestSources.includes(run.requestSource),
+      );
+    }
+
     const items = filteredRuns.slice(offset, offset + limit);
     return { items, total: filteredRuns.length };
+  }
+
+  async getPrometheusRunMetrics(params: {
+    orgId: string;
+    windowSeconds: number;
+  }): Promise<PrometheusRunMetrics> {
+    // Placeholder implementation (metrics are Postgres-backed in production)
+    return { runsTotal: [], runDurationSecondsP95: [] };
   }
 
   async clearAll(): Promise<void> {
@@ -189,8 +211,8 @@ export class MemoryStore implements DataStore {
     this.storage.runs.clear();
     this.storage.runsIndex.clear();
     this.storage.workflows.clear();
-    this.storage.workflowSchedules.clear();
-    this.storage.integrations.clear();
+    this.storage.toolSchedules.clear();
+    this.storage.systems.clear();
     this.storage.discoveryRuns.clear();
     this.storage.fileReferences.clear();
   }
@@ -223,7 +245,7 @@ export class MemoryStore implements DataStore {
     if (!id) return null;
     const key = this.getKey("workflow", id, orgId);
     const workflow = this.storage.workflows.get(key);
-    return workflow ? { ...workflow, id } : null;
+    return workflow ? normalizeTool({ ...workflow, id }) : null;
   }
 
   async listWorkflows(params?: {
@@ -232,10 +254,9 @@ export class MemoryStore implements DataStore {
     orgId?: string;
   }): Promise<{ items: Tool[]; total: number }> {
     const { limit = 10, offset = 0, orgId } = params || {};
-    const items = this.getOrgItems(this.storage.workflows, "workflow", orgId).slice(
-      offset,
-      offset + limit,
-    );
+    const items = this.getOrgItems(this.storage.workflows, "workflow", orgId)
+      .slice(offset, offset + limit)
+      .map(normalizeTool);
     const total = this.getOrgItems(this.storage.workflows, "workflow", orgId).length;
     return { items, total };
   }
@@ -281,15 +302,15 @@ export class MemoryStore implements DataStore {
     // Save new workflow
     this.storage.workflows.set(newKey, newWorkflow);
 
-    // Update all workflow schedules that reference this workflow
-    for (const [key, schedule] of this.storage.workflowSchedules.entries()) {
-      if (schedule.workflowId === oldId && schedule.orgId === (orgId || "")) {
+    // Update all tool schedules that reference this tool
+    for (const [key, schedule] of this.storage.toolSchedules.entries()) {
+      if (schedule.toolId === oldId && schedule.orgId === (orgId || "")) {
         const updatedSchedule = {
           ...schedule,
-          workflowId: newId,
+          toolId: newId,
           updatedAt: new Date(),
         };
-        this.storage.workflowSchedules.set(key, updatedSchedule);
+        this.storage.toolSchedules.set(key, updatedSchedule);
       }
     }
 
@@ -299,118 +320,132 @@ export class MemoryStore implements DataStore {
     return newWorkflow;
   }
 
-  // Integration Methods
-  async getIntegration(params: {
+  // Tool History Methods (no-op for MemoryStore)
+  async listToolHistory(_params: {
+    toolId: string;
+    orgId?: string;
+  }): Promise<import("./types.js").ToolHistoryEntry[]> {
+    return [];
+  }
+
+  async restoreToolVersion(params: {
+    toolId: string;
+    version: number;
+    orgId?: string;
+    userId?: string;
+    userEmail?: string;
+  }): Promise<Tool> {
+    throw new Error("Tool history not supported in MemoryStore");
+  }
+
+  // System Methods
+  async getSystem(params: {
     id: string;
     includeDocs?: boolean;
     orgId?: string;
-  }): Promise<Integration | null> {
+  }): Promise<System | null> {
     const { id, includeDocs = true, orgId } = params;
     if (!id) return null;
-    const key = this.getKey("integration", id, orgId);
-    const integration = this.storage.integrations.get(key);
-    return integration ? { ...integration, id } : null;
+    const key = this.getKey("system", id, orgId);
+    const system = this.storage.systems.get(key);
+    return system ? { ...system, id } : null;
   }
 
-  async listIntegrations(params?: {
+  async listSystems(params?: {
     limit?: number;
     offset?: number;
     includeDocs?: boolean;
     orgId?: string;
-  }): Promise<{ items: Integration[]; total: number }> {
+  }): Promise<{ items: System[]; total: number }> {
     const { limit = 10, offset = 0, includeDocs = true, orgId } = params || {};
-    const items = this.getOrgItems(this.storage.integrations, "integration", orgId).slice(
+    const items = this.getOrgItems(this.storage.systems, "system", orgId).slice(
       offset,
       offset + limit,
     );
-    const total = this.getOrgItems(this.storage.integrations, "integration", orgId).length;
+    const total = this.getOrgItems(this.storage.systems, "system", orgId).length;
     return { items, total };
   }
 
-  async getManyIntegrations(params: {
+  async getManySystems(params: {
     ids: string[];
     includeDocs?: boolean;
     orgId?: string;
-  }): Promise<Integration[]> {
+  }): Promise<System[]> {
     const { ids, orgId } = params;
     return ids
       .map((id) => {
-        const key = this.getKey("integration", id, orgId);
-        const integration = this.storage.integrations.get(key);
-        return integration ? { ...integration, id } : null;
+        const key = this.getKey("system", id, orgId);
+        const system = this.storage.systems.get(key);
+        return system ? { ...system, id } : null;
       })
-      .filter((i): i is Integration => i !== null);
+      .filter((i): i is System => i !== null);
   }
 
-  async upsertIntegration(params: {
-    id: string;
-    integration: Integration;
-    orgId?: string;
-  }): Promise<Integration> {
-    const { id, integration, orgId } = params;
-    if (!id || !integration) return null;
-    const key = this.getKey("integration", id, orgId);
-    this.storage.integrations.set(key, integration);
-    return { ...integration, id };
+  async upsertSystem(params: { id: string; system: System; orgId?: string }): Promise<System> {
+    const { id, system, orgId } = params;
+    if (!id || !system) return null;
+    const key = this.getKey("system", id, orgId);
+    this.storage.systems.set(key, system);
+    return { ...system, id };
   }
 
-  async deleteIntegration(params: { id: string; orgId?: string }): Promise<boolean> {
+  async deleteSystem(params: { id: string; orgId?: string }): Promise<boolean> {
     const { id, orgId } = params;
     if (!id) return false;
-    const key = this.getKey("integration", id, orgId);
-    return this.storage.integrations.delete(key);
+    const key = this.getKey("system", id, orgId);
+    return this.storage.systems.delete(key);
   }
 
-  async copyTemplateDocumentationToUserIntegration(params: {
+  async copyTemplateDocumentationToUserSystem(params: {
     templateId: string;
-    userIntegrationId: string;
+    userSystemId: string;
     orgId?: string;
   }): Promise<boolean> {
     // Not supported for memory store
     return false;
   }
 
-  // Workflow Schedule Methods
-  async listWorkflowSchedules(params: {
-    workflowId?: string;
+  // Tool Schedule Methods
+  async listToolSchedules(params: {
+    toolId?: string;
     orgId: string;
   }): Promise<ToolScheduleInternal[]> {
-    const { workflowId, orgId } = params;
-    const schedules = this.getOrgItems(this.storage.workflowSchedules, "workflow-schedule", orgId);
-    if (workflowId) {
-      return schedules.filter((schedule) => schedule.workflowId === workflowId);
+    const { toolId, orgId } = params;
+    const schedules = this.getOrgItems(this.storage.toolSchedules, "workflow-schedule", orgId);
+    if (toolId) {
+      return schedules.filter((schedule) => schedule.toolId === toolId);
     }
     return schedules;
   }
 
-  async getWorkflowSchedule(params: {
+  async getToolSchedule(params: {
     id: string;
     orgId?: string;
   }): Promise<ToolScheduleInternal | null> {
     const { id, orgId } = params;
     if (!id) return null;
     const key = this.getKey("workflow-schedule", id, orgId);
-    const schedule = this.storage.workflowSchedules.get(key);
+    const schedule = this.storage.toolSchedules.get(key);
     return schedule ? { ...schedule, id } : null;
   }
 
-  async upsertWorkflowSchedule(params: { schedule: ToolScheduleInternal }): Promise<void> {
+  async upsertToolSchedule(params: { schedule: ToolScheduleInternal }): Promise<void> {
     const { schedule } = params;
     if (!schedule || !schedule.id) return;
     const key = this.getKey("workflow-schedule", schedule.id, schedule.orgId);
-    this.storage.workflowSchedules.set(key, schedule);
+    this.storage.toolSchedules.set(key, schedule);
   }
 
-  async deleteWorkflowSchedule(params: { id: string; orgId: string }): Promise<boolean> {
+  async deleteToolSchedule(params: { id: string; orgId: string }): Promise<boolean> {
     const { id, orgId } = params;
     if (!id) return false;
     const key = this.getKey("workflow-schedule", id, orgId);
-    return this.storage.workflowSchedules.delete(key);
+    return this.storage.toolSchedules.delete(key);
   }
 
-  async listDueWorkflowSchedules(): Promise<ToolScheduleInternal[]> {
+  async listDueToolSchedules(): Promise<ToolScheduleInternal[]> {
     const now = new Date();
-    return Array.from(this.storage.workflowSchedules.entries())
+    return Array.from(this.storage.toolSchedules.entries())
       .filter(([key]) => key.includes(":workflow-schedule:"))
       .map(([key, value]) => ({ ...value, id: key.split(":").pop() }))
       .filter((schedule) => schedule.enabled && schedule.nextRunAt <= now);
@@ -424,7 +459,7 @@ export class MemoryStore implements DataStore {
     const { id, nextRunAt, lastRunAt } = params;
     if (!id) return false;
 
-    for (const [key, schedule] of this.storage.workflowSchedules.entries()) {
+    for (const [key, schedule] of this.storage.toolSchedules.entries()) {
       if (schedule.id === id) {
         const updatedSchedule = {
           ...schedule,
@@ -432,7 +467,7 @@ export class MemoryStore implements DataStore {
           lastRunAt,
           updatedAt: new Date(),
         };
-        this.storage.workflowSchedules.set(key, updatedSchedule);
+        this.storage.toolSchedules.set(key, updatedSchedule);
         return true;
       }
     }

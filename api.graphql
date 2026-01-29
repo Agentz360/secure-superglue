@@ -29,12 +29,7 @@ type ApiConfig implements BaseConfig {
   queryParams: JSON
   headers: JSON
   body: String
-  documentationUrl: String
-  responseSchema: JSONSchema
-  responseMapping: JSONata
-  authentication: AuthType
   pagination: Pagination
-  dataPath: String
 }
 
 # used by the tool creation for file content extraction
@@ -109,8 +104,8 @@ type WorkflowList {
   total: Int!
 }
 
-type IntegrationList {
-  items: [Integration!]!
+type SystemList {
+  items: [System!]!
   total: Int!
 }
 
@@ -201,12 +196,7 @@ input ApiInput {
   method: HttpMethod
   headers: JSON
   body: String
-  documentationUrl: String
-  responseSchema: JSONSchema
-  responseMapping: JSONata
-  authentication: AuthType
   pagination: PaginationInput
-  dataPath: String
   version: String
 }
 
@@ -251,6 +241,46 @@ enum RunStatus {
   ABORTED
 }
 
+enum FilterTarget {
+  KEYS
+  VALUES
+  BOTH
+}
+
+enum FilterAction {
+  REMOVE
+  MASK
+  FAIL
+}
+
+enum RemoveScope {
+  FIELD
+  ITEM
+  ENTRY
+}
+
+type ResponseFilter {
+  id: ID!
+  name: String
+  enabled: Boolean!
+  target: FilterTarget!
+  pattern: String!
+  action: FilterAction!
+  maskValue: String
+  scope: RemoveScope
+}
+
+input ResponseFilterInput {
+  id: ID!
+  name: String
+  enabled: Boolean!
+  target: FilterTarget!
+  pattern: String!
+  action: FilterAction!
+  maskValue: String
+  scope: RemoveScope
+}
+
 input ApiInputRequest @oneOf {
   endpoint: ApiInput
   id: ID
@@ -267,7 +297,7 @@ input WorkflowInputRequest @oneOf {
   id: ID
 }
 
-input IntegrationInput {
+input SystemInput {
   id: ID!
   name: String
   urlHost: String
@@ -278,6 +308,9 @@ input IntegrationInput {
   documentationPending: Boolean
   specificInstructions: String
   documentationKeywords: [String!]
+  icon: String
+  metadata: JSON
+  templateName: String
 }
 
 type Log {
@@ -288,13 +321,8 @@ type Log {
   traceId: ID
 }
 
-type SuggestedIntegration {
-  reason: String!
-  integration: Integration!
-}
-
 type ToolStep {
-  integrationId: String
+  systemId: String
   instruction: String
 }
 
@@ -308,22 +336,15 @@ type SuggestedTool {
 }
 
 type Query {
-  listRuns(limit: Int = 10, offset: Int = 0, configId: ID): RunList!
-  listApis(limit: Int = 10, offset: Int = 0): ApiList!
   listWorkflows(limit: Int = 10, offset: Int = 0): WorkflowList!
-  listIntegrations(limit: Int = 10, offset: Int = 0): IntegrationList!
-  findRelevantIntegrations(searchTerms: String): [SuggestedIntegration!]
+  listSystems(limit: Int = 10, offset: Int = 0): SystemList!
   findRelevantTools(searchTerms: String): [SuggestedTool!]
 
-  getRun(id: ID!): Run
-  getApi(id: ID!): ApiConfig
   getWorkflow(id: ID!): Workflow
-  getIntegration(id: ID!): Integration
-  searchIntegrationDocumentation(integrationId: ID!, keywords: String!): String!
-  generateInstructions(integrations: [IntegrationInput!]!): [String!]!
+  getSystem(id: ID!): System
+  searchSystemDocumentation(systemId: ID!, keywords: String!): String!
+  generateInstructions(systems: [SystemInput!]!): [String!]!
   getTenantInfo: TenantInfo
-
-  listWorkflowSchedules(workflowId: String): [WorkflowSchedule!]!
 }
 
 type TenantInfo {
@@ -335,12 +356,9 @@ type ExecutionStep {
   id: String!
   modify: Boolean
   apiConfig: ApiConfig!
-  integrationId: ID
+  systemId: ID
   executionMode: String # DIRECT | LOOP
   loopSelector: JSONata
-  loopMaxIters: Int
-  inputMapping: JSONata
-  responseMapping: JSONata
   failureBehavior: FailureBehavior
 }
 
@@ -348,12 +366,9 @@ input ExecutionStepInput {
   id: String!
   modify: Boolean
   apiConfig: ApiInput!
-  integrationId: ID
+  systemId: ID
   executionMode: String # DIRECT | LOOP
   loopSelector: JSONata
-  loopMaxIters: Int
-  inputMapping: JSONata
-  responseMapping: JSONata
   failureBehavior: FailureBehavior
 }
 
@@ -366,7 +381,7 @@ type Workflow implements BaseConfig {
 
   # Specific implementation
   steps: [ExecutionStep!]
-  integrationIds: [ID]
+  systemIds: [ID]
   instruction: String
   finalTransform: JSONata
   responseSchema: JSONSchema
@@ -374,6 +389,7 @@ type Workflow implements BaseConfig {
   originalResponseSchema: JSONSchema
   folder: String
   archived: Boolean
+  responseFilters: [ResponseFilter!]
 }
 
 type WorkflowStepResult {
@@ -410,24 +426,10 @@ type AbortToolExecutionResult {
   runId: ID!
 }
 
-type WorkflowSchedule {
-  id: ID!
-  workflowId: String!
-  cronExpression: String!
-  timezone: String!
-  enabled: Boolean!
-  payload: JSON
-  options: JSON
-  lastRunAt: DateTime
-  nextRunAt: DateTime!
-  createdAt: DateTime!
-  updatedAt: DateTime!
-}
-
 input WorkflowInput {
   id: String!
   steps: [ExecutionStepInput!]
-  integrationIds: [ID!]
+  systemIds: [ID!]
   finalTransform: JSONata
   inputSchema: JSONSchema
   responseSchema: JSONSchema
@@ -435,16 +437,7 @@ input WorkflowInput {
   instruction: String
   folder: String
   archived: Boolean
-}
-
-input WorkflowScheduleInput {
-  id: ID
-  workflowId: ID
-  cronExpression: String
-  timezone: String
-  enabled: Boolean
-  payload: JSON
-  options: JSON
+  responseFilters: [ResponseFilterInput!]
 }
 
 type Mutation {
@@ -471,13 +464,13 @@ type Mutation {
   buildWorkflow(
     instruction: String!
     payload: JSON
-    integrationIds: [ID!]
+    systemIds: [ID!]
     responseSchema: JSONSchema
     traceId: ID
   ): Workflow!
 
   generateStepConfig(
-    integrationId: String
+    systemId: String
     currentStepConfig: JSON
     currentDataSelector: String
     stepInput: JSON
@@ -497,18 +490,15 @@ type Mutation {
   deleteWorkflow(id: ID!): Boolean!
   renameWorkflow(oldId: ID!, newId: ID!): Workflow!
 
-  upsertWorkflowSchedule(schedule: WorkflowScheduleInput!): WorkflowSchedule!
-  deleteWorkflowSchedule(id: ID!): Boolean!
-
   upsertApi(id: ID!, input: JSON!): ApiConfig!
   deleteApi(id: ID!): Boolean!
 
-  upsertIntegration(
-    input: IntegrationInput!
+  upsertSystem(
+    input: SystemInput!
     mode: UpsertMode = UPSERT
     credentialMode: CredentialMode = MERGE
-  ): Integration!
-  deleteIntegration(id: ID!): Boolean!
+  ): System!
+  deleteSystem(id: ID!): Boolean!
 
   cacheOauthClientCredentials(
     clientCredentialsUid: String!
@@ -518,7 +508,7 @@ type Mutation {
   getOAuthClientCredentials(templateId: ID, clientCredentialsUid: String): OAuthClientCredentials!
 
   callEndpoint(
-    integrationId: ID
+    systemId: ID
     method: HttpMethod!
     url: String!
     headers: JSON
@@ -530,7 +520,7 @@ type Mutation {
     workflow: WorkflowInput!
     fixInstructions: String!
     lastError: String
-    integrationIds: [ID!]
+    systemIds: [ID!]
   ): FixWorkflowResult!
 }
 
@@ -538,7 +528,7 @@ type Subscription {
   logs: Log!
 }
 
-type Integration {
+type System {
   id: ID!
   name: String
   type: String
@@ -553,6 +543,8 @@ type Integration {
   specificInstructions: String
   documentationKeywords: [String!]
   icon: String
+  metadata: JSON
+  templateName: String
   version: String
   createdAt: DateTime
   updatedAt: DateTime
@@ -574,8 +566,10 @@ type CallEndpointResult {
 }
 
 type ToolDiff {
-  old_string: String!
-  new_string: String!
+  op: String!
+  path: String!
+  value: JSON
+  from: String
 }
 
 type FixWorkflowResult {

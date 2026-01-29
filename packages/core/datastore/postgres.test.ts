@@ -1,4 +1,4 @@
-import { ApiConfig, HttpMethod, Integration, Run, RunStatus, Tool } from "@superglue/shared";
+import { ApiConfig, HttpMethod, Run, RunStatus, System, Tool } from "@superglue/shared";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PostgresService } from "./postgres.js";
 import { ToolScheduleInternal } from "./types.js";
@@ -122,36 +122,37 @@ if (!testConfig.host || !testConfig.user || !testConfig.password) {
       };
 
       const testRun: Run = {
-        id: "test-run-id",
+        runId: "test-run-id",
         toolId: "test-api-id",
-        orgId: testOrgId,
         status: RunStatus.SUCCESS,
-        toolConfig: { id: "test-api-id", steps: [{ id: "step1", apiConfig: testApiConfig }] },
-        startedAt: new Date(),
-        completedAt: new Date(),
+        tool: { id: "test-api-id", steps: [{ id: "step1", apiConfig: testApiConfig }] },
+        metadata: {
+          startedAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+        },
       };
 
       it("should store and retrieve runs", async () => {
-        await store.createRun({ run: testRun });
-        const retrieved = await store.getRun({ id: testRun.id, orgId: testOrgId });
-        expect(retrieved?.id).toEqual(testRun.id);
+        await store.createRun({ run: testRun, orgId: testOrgId });
+        const retrieved = await store.getRun({ id: testRun.runId, orgId: testOrgId });
+        expect(retrieved?.runId).toEqual(testRun.runId);
         expect(retrieved?.status).toEqual(testRun.status);
       });
 
       it("should list runs in chronological order", async () => {
         const run1: Run = {
           ...testRun,
-          id: "run1",
-          startedAt: new Date(Date.now() - 1000),
+          runId: "run1",
+          metadata: { startedAt: new Date(Date.now() - 1000).toISOString() },
         };
         const run2: Run = {
           ...testRun,
-          id: "run2",
-          startedAt: new Date(),
+          runId: "run2",
+          metadata: { startedAt: new Date().toISOString() },
         };
 
-        await store.createRun({ run: run1 });
-        await store.createRun({ run: run2 });
+        await store.createRun({ run: run1, orgId: testOrgId });
+        await store.createRun({ run: run2, orgId: testOrgId });
 
         const { items, total } = await store.listRuns({
           limit: 10,
@@ -161,18 +162,18 @@ if (!testConfig.host || !testConfig.user || !testConfig.password) {
         });
         expect(items).toHaveLength(2);
         expect(total).toBe(2);
-        expect(items[0].id).toBe(run2.id);
-        expect(items[1].id).toBe(run1.id);
+        expect(items[0].runId).toBe(run2.runId);
+        expect(items[1].runId).toBe(run1.runId);
       });
 
       it("should list runs filtered by config ID", async () => {
-        const run1: Run = { ...testRun, id: "run1", toolId: "config1" };
-        const run2: Run = { ...testRun, id: "run2", toolId: "config2" };
-        const run3: Run = { ...testRun, id: "run3", toolId: "config1" };
+        const run1: Run = { ...testRun, runId: "run1", toolId: "config1" };
+        const run2: Run = { ...testRun, runId: "run2", toolId: "config2" };
+        const run3: Run = { ...testRun, runId: "run3", toolId: "config1" };
 
-        await store.createRun({ run: run1 });
-        await store.createRun({ run: run2 });
-        await store.createRun({ run: run3 });
+        await store.createRun({ run: run1, orgId: testOrgId });
+        await store.createRun({ run: run2, orgId: testOrgId });
+        await store.createRun({ run: run3, orgId: testOrgId });
 
         const { items, total } = await store.listRuns({
           limit: 10,
@@ -182,41 +183,106 @@ if (!testConfig.host || !testConfig.user || !testConfig.password) {
         });
         expect(items.length).toBe(2);
         expect(total).toBe(2);
-        expect(items.map((run) => run.id).sort()).toEqual(["run1", "run3"]);
+        expect(items.map((run) => run.runId).sort()).toEqual(["run1", "run3"]);
+      });
+
+      it("should store and retrieve requestSource correctly", async () => {
+        const runWithSource: Run = {
+          ...testRun,
+          runId: "run-with-source",
+          requestSource: "api" as any,
+        };
+        await store.createRun({ run: runWithSource, orgId: testOrgId });
+        const retrieved = await store.getRun({ id: runWithSource.runId, orgId: testOrgId });
+        expect(retrieved?.requestSource).toEqual("api");
+      });
+
+      it("should default requestSource to 'api' when not provided", async () => {
+        const runWithoutSource: Run = {
+          ...testRun,
+          runId: "run-without-source",
+          requestSource: undefined,
+        };
+        await store.createRun({ run: runWithoutSource, orgId: testOrgId });
+        const retrieved = await store.getRun({ id: runWithoutSource.runId, orgId: testOrgId });
+        // Column defaults to 'api', extractRun should return it
+        expect(retrieved?.requestSource).toEqual("api");
+      });
+
+      it("should preserve all valid requestSource values", async () => {
+        const sources = ["api", "frontend", "scheduler", "mcp", "tool-chain", "webhook"] as const;
+        for (const source of sources) {
+          const run: Run = {
+            ...testRun,
+            runId: `run-source-${source}`,
+            requestSource: source as any,
+          };
+          await store.createRun({ run, orgId: testOrgId });
+          const retrieved = await store.getRun({ id: run.runId, orgId: testOrgId });
+          expect(retrieved?.requestSource).toEqual(source);
+        }
+      });
+
+      it("should include requestSource in listRuns results", async () => {
+        const run1: Run = { ...testRun, runId: "list-run-1", requestSource: "api" as any };
+        const run2: Run = { ...testRun, runId: "list-run-2", requestSource: "scheduler" as any };
+        await store.createRun({ run: run1, orgId: testOrgId });
+        await store.createRun({ run: run2, orgId: testOrgId });
+
+        const { items } = await store.listRuns({ limit: 10, offset: 0, orgId: testOrgId });
+        const sources = items.map((r) => r.requestSource).sort();
+        expect(sources).toContain("api");
+        expect(sources).toContain("scheduler");
+      });
+
+      it("should preserve requestSource during updateRun", async () => {
+        const run: Run = { ...testRun, runId: "update-source-run", requestSource: "mcp" as any };
+        await store.createRun({ run, orgId: testOrgId });
+
+        await store.updateRun({
+          id: run.runId,
+          orgId: testOrgId,
+          updates: { status: RunStatus.FAILED, error: "Test error" },
+        });
+
+        const retrieved = await store.getRun({ id: run.runId, orgId: testOrgId });
+        expect(retrieved?.requestSource).toEqual("mcp");
+        expect(retrieved?.status).toEqual(RunStatus.FAILED);
       });
     });
 
-    describe("Integration", () => {
-      const testIntegration: Integration = {
-        id: "test-int-id",
-        name: "Test Integration",
-        urlHost: "https://integration.test",
+    describe("System", () => {
+      const testSystem: System = {
+        id: "test-system-id",
+        name: "Test System",
+        urlHost: "https://system.test",
         credentials: { apiKey: "secret" },
+        templateName: "slack",
         createdAt: new Date(),
         updatedAt: new Date(),
       };
 
-      it("should store and retrieve integrations", async () => {
-        await store.upsertIntegration({
-          id: testIntegration.id,
-          integration: testIntegration,
+      it("should store and retrieve systems", async () => {
+        await store.upsertSystem({
+          id: testSystem.id,
+          system: testSystem,
           orgId: testOrgId,
         });
-        const retrieved = await store.getIntegration({
-          id: testIntegration.id,
+        const retrieved = await store.getSystem({
+          id: testSystem.id,
           includeDocs: true,
           orgId: testOrgId,
         });
-        expect(retrieved).toMatchObject({ ...testIntegration, id: testIntegration.id });
+        expect(retrieved).toMatchObject({ ...testSystem, id: testSystem.id });
       });
 
-      it("should list integrations", async () => {
-        await store.upsertIntegration({
-          id: testIntegration.id,
-          integration: testIntegration,
+      it("should list systems", async () => {
+        await store.upsertSystem({
+          id: testSystem.id,
+          system: testSystem,
           orgId: testOrgId,
         });
-        const { items, total } = await store.listIntegrations({
+        const { items, total } = await store.listSystems({
           limit: 10,
           offset: 0,
           includeDocs: true,
@@ -224,48 +290,48 @@ if (!testConfig.host || !testConfig.user || !testConfig.password) {
         });
         expect(items).toHaveLength(1);
         expect(total).toBe(1);
-        expect(items[0]).toMatchObject({ ...testIntegration, id: testIntegration.id });
+        expect(items[0]).toMatchObject({ ...testSystem, id: testSystem.id });
       });
 
-      it("should delete integrations without details", async () => {
-        await store.upsertIntegration({
-          id: testIntegration.id,
-          integration: testIntegration,
+      it("should delete systems without details", async () => {
+        await store.upsertSystem({
+          id: testSystem.id,
+          system: testSystem,
           orgId: testOrgId,
         });
-        await store.deleteIntegration({ id: testIntegration.id, orgId: testOrgId });
-        const retrieved = await store.getIntegration({
-          id: testIntegration.id,
+        await store.deleteSystem({ id: testSystem.id, orgId: testOrgId });
+        const retrieved = await store.getSystem({
+          id: testSystem.id,
           includeDocs: true,
           orgId: testOrgId,
         });
         expect(retrieved).toBeNull();
       });
 
-      it("should delete integrations with details", async () => {
-        const integrationWithDetails: Integration = {
-          ...testIntegration,
+      it("should delete systems with details", async () => {
+        const systemWithDetails: System = {
+          ...testSystem,
           id: "test-int-with-details",
           documentation: "Test documentation content",
           openApiSchema: '{"openapi": "3.0.0", "info": {"title": "Test API"}}',
         };
 
-        await store.upsertIntegration({
-          id: integrationWithDetails.id,
-          integration: integrationWithDetails,
+        await store.upsertSystem({
+          id: systemWithDetails.id,
+          system: systemWithDetails,
           orgId: testOrgId,
         });
-        await store.deleteIntegration({ id: integrationWithDetails.id, orgId: testOrgId });
-        const retrieved = await store.getIntegration({
-          id: integrationWithDetails.id,
+        await store.deleteSystem({ id: systemWithDetails.id, orgId: testOrgId });
+        const retrieved = await store.getSystem({
+          id: systemWithDetails.id,
           includeDocs: true,
           orgId: testOrgId,
         });
         expect(retrieved).toBeNull();
       });
 
-      it("should return null for missing integration", async () => {
-        const retrieved = await store.getIntegration({
+      it("should return null for missing system", async () => {
+        const retrieved = await store.getSystem({
           id: "does-not-exist",
           includeDocs: true,
           orgId: testOrgId,
@@ -273,20 +339,20 @@ if (!testConfig.host || !testConfig.user || !testConfig.password) {
         expect(retrieved).toBeNull();
       });
 
-      it("should get many integrations by ids, skipping missing ones", async () => {
-        const int2 = { ...testIntegration, id: "test-int-id-2", name: "Integration 2" };
-        await store.upsertIntegration({
-          id: testIntegration.id,
-          integration: testIntegration,
+      it("should get many systems by ids, skipping missing ones", async () => {
+        const system2 = { ...testSystem, id: "test-system-id-2", name: "System 2" };
+        await store.upsertSystem({
+          id: testSystem.id,
+          system: testSystem,
           orgId: testOrgId,
         });
-        await store.upsertIntegration({ id: int2.id, integration: int2, orgId: testOrgId });
-        const result = await store.getManyIntegrations({
-          ids: [testIntegration.id, int2.id, "missing-id"],
+        await store.upsertSystem({ id: system2.id, system: system2, orgId: testOrgId });
+        const result = await store.getManySystems({
+          ids: [testSystem.id, system2.id, "missing-id"],
           orgId: testOrgId,
         });
         expect(result).toHaveLength(2);
-        expect(result.map((i) => i.id).sort()).toEqual([testIntegration.id, int2.id].sort());
+        expect(result.map((i) => i.id).sort()).toEqual([testSystem.id, system2.id].sort());
       });
     });
 
@@ -343,6 +409,133 @@ if (!testConfig.host || !testConfig.user || !testConfig.password) {
       });
     });
 
+    describe("Tool History", () => {
+      const testWorkflow: Tool = {
+        id: "test-history-workflow",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        instruction: "Test workflow v1",
+        steps: [],
+        inputSchema: {},
+      };
+
+      it("should archive previous version on upsert", async () => {
+        // First save
+        await store.upsertWorkflow({
+          id: testWorkflow.id,
+          workflow: testWorkflow,
+          orgId: testOrgId,
+          userId: "user-1",
+          userEmail: "user1@test.com",
+        });
+
+        // Second save with changes
+        const updatedWorkflow = { ...testWorkflow, instruction: "Test workflow v2" };
+        await store.upsertWorkflow({
+          id: testWorkflow.id,
+          workflow: updatedWorkflow,
+          orgId: testOrgId,
+          userId: "user-2",
+          userEmail: "user2@test.com",
+        });
+
+        // Check history
+        const history = await store.listToolHistory({
+          toolId: testWorkflow.id,
+          orgId: testOrgId,
+        });
+
+        expect(history).toHaveLength(1);
+        expect(history[0].version).toBe(1);
+        expect(history[0].tool.instruction).toBe("Test workflow v1");
+        expect(history[0].createdByUserId).toBe("user-2");
+        expect(history[0].createdByEmail).toBe("user2@test.com");
+      });
+
+      it("should return empty history for new tool", async () => {
+        await store.upsertWorkflow({
+          id: "brand-new-tool",
+          workflow: { ...testWorkflow, id: "brand-new-tool" },
+          orgId: testOrgId,
+        });
+
+        const history = await store.listToolHistory({
+          toolId: "brand-new-tool",
+          orgId: testOrgId,
+        });
+
+        expect(history).toHaveLength(0);
+      });
+
+      it("should restore a previous version", async () => {
+        // Create initial version
+        await store.upsertWorkflow({
+          id: testWorkflow.id,
+          workflow: { ...testWorkflow, instruction: "Original" },
+          orgId: testOrgId,
+        });
+
+        // Update to v2
+        await store.upsertWorkflow({
+          id: testWorkflow.id,
+          workflow: { ...testWorkflow, instruction: "Updated" },
+          orgId: testOrgId,
+        });
+
+        // Update to v3
+        await store.upsertWorkflow({
+          id: testWorkflow.id,
+          workflow: { ...testWorkflow, instruction: "Updated again" },
+          orgId: testOrgId,
+        });
+
+        // History should have 2 entries (v1 and v2)
+        let history = await store.listToolHistory({
+          toolId: testWorkflow.id,
+          orgId: testOrgId,
+        });
+        expect(history).toHaveLength(2);
+
+        // Restore v1
+        const restored = await store.restoreToolVersion({
+          toolId: testWorkflow.id,
+          version: 1,
+          orgId: testOrgId,
+          userId: "restorer",
+          userEmail: "restorer@test.com",
+        });
+
+        expect(restored.instruction).toBe("Original");
+
+        // Current should now be "Original"
+        const current = await store.getWorkflow({ id: testWorkflow.id, orgId: testOrgId });
+        expect(current?.instruction).toBe("Original");
+
+        // History should now have 3 entries (v1, v2, v3 - the "Updated again" that was current)
+        history = await store.listToolHistory({
+          toolId: testWorkflow.id,
+          orgId: testOrgId,
+        });
+        expect(history).toHaveLength(3);
+      });
+
+      it("should throw error when restoring non-existent version", async () => {
+        await store.upsertWorkflow({
+          id: testWorkflow.id,
+          workflow: testWorkflow,
+          orgId: testOrgId,
+        });
+
+        await expect(
+          store.restoreToolVersion({
+            toolId: testWorkflow.id,
+            version: 999,
+            orgId: testOrgId,
+          }),
+        ).rejects.toThrow("Version 999 not found");
+      });
+    });
+
     describe("Workflow Schedule", () => {
       const testWorkflow: Tool = {
         id: "test-workflow-id",
@@ -356,7 +549,7 @@ if (!testConfig.host || !testConfig.user || !testConfig.password) {
       const testWorkflowSchedule: ToolScheduleInternal = {
         id: "68d51b90-605d-4e85-8c9a-c82bad2c7337",
         orgId: testOrgId,
-        workflowId: testWorkflow.id,
+        toolId: testWorkflow.id,
         payload: null,
         options: null,
         lastRunAt: null,
@@ -374,9 +567,9 @@ if (!testConfig.host || !testConfig.user || !testConfig.password) {
           workflow: testWorkflow,
           orgId: testOrgId,
         });
-        await store.upsertWorkflowSchedule({ schedule: testWorkflowSchedule });
-        const retrieved = await store.listWorkflowSchedules({
-          workflowId: testWorkflow.id,
+        await store.upsertToolSchedule({ schedule: testWorkflowSchedule });
+        const retrieved = await store.listToolSchedules({
+          toolId: testWorkflow.id,
           orgId: testOrgId,
         });
 
@@ -395,15 +588,15 @@ if (!testConfig.host || !testConfig.user || !testConfig.password) {
           workflow: testWorkflow,
           orgId: testOrgId,
         });
-        await store.upsertWorkflowSchedule({ schedule: testWorkflowSchedule });
+        await store.upsertToolSchedule({ schedule: testWorkflowSchedule });
         const updatedSchedule = {
           ...testWorkflowSchedule,
           cronExpression: "*/15 * * * * *",
         };
 
-        await store.upsertWorkflowSchedule({ schedule: updatedSchedule });
+        await store.upsertToolSchedule({ schedule: updatedSchedule });
 
-        const retrieved = await store.getWorkflowSchedule({
+        const retrieved = await store.getToolSchedule({
           id: testWorkflowSchedule.id,
           orgId: testOrgId,
         });
@@ -421,16 +614,16 @@ if (!testConfig.host || !testConfig.user || !testConfig.password) {
           workflow: testWorkflow,
           orgId: testOrgId,
         });
-        await store.upsertWorkflowSchedule({ schedule: testWorkflowSchedule });
+        await store.upsertToolSchedule({ schedule: testWorkflowSchedule });
 
-        const success = await store.deleteWorkflowSchedule({
+        const success = await store.deleteToolSchedule({
           id: testWorkflowSchedule.id,
           orgId: testOrgId,
         });
         expect(success).toBe(true);
 
-        const retrieved = await store.listWorkflowSchedules({
-          workflowId: testWorkflow.id,
+        const retrieved = await store.listToolSchedules({
+          toolId: testWorkflow.id,
           orgId: testOrgId,
         });
         expect(retrieved).toHaveLength(0);
@@ -448,22 +641,22 @@ if (!testConfig.host || !testConfig.user || !testConfig.password) {
           orgId: testOrgId2,
         });
 
-        await store.upsertWorkflowSchedule({
+        await store.upsertToolSchedule({
           schedule: {
             ...testWorkflowSchedule,
             orgId: testOrgId,
           },
         });
 
-        await store.upsertWorkflowSchedule({
+        await store.upsertToolSchedule({
           schedule: {
             ...testWorkflowSchedule,
             orgId: testOrgId2,
           },
         });
 
-        const workflowSchedulesFromFirstOrg = await store.listWorkflowSchedules({
-          workflowId: testWorkflow.id,
+        const workflowSchedulesFromFirstOrg = await store.listToolSchedules({
+          toolId: testWorkflow.id,
           orgId: testOrgId,
         });
         expect(workflowSchedulesFromFirstOrg).toHaveLength(1);
@@ -475,8 +668,8 @@ if (!testConfig.host || !testConfig.user || !testConfig.password) {
           createdAt: expect.any(Date),
         });
 
-        const workflowSchedulesFromSecondOrg = await store.listWorkflowSchedules({
-          workflowId: testWorkflow.id,
+        const workflowSchedulesFromSecondOrg = await store.listToolSchedules({
+          toolId: testWorkflow.id,
           orgId: testOrgId2,
         });
         expect(workflowSchedulesFromSecondOrg).toHaveLength(1);
@@ -489,12 +682,12 @@ if (!testConfig.host || !testConfig.user || !testConfig.password) {
         });
       });
 
-      it("should list all workflow schedules for org when workflowId is not provided", async () => {
+      it("should list all workflow schedules for org when toolId is not provided", async () => {
         const testWorkflow2 = { ...testWorkflow, id: "test-workflow-2" };
         const testSchedule2: ToolScheduleInternal = {
           ...testWorkflowSchedule,
           id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-          workflowId: testWorkflow2.id,
+          toolId: testWorkflow2.id,
         };
 
         await store.upsertWorkflow({
@@ -507,10 +700,10 @@ if (!testConfig.host || !testConfig.user || !testConfig.password) {
           workflow: testWorkflow2,
           orgId: testOrgId,
         });
-        await store.upsertWorkflowSchedule({ schedule: testWorkflowSchedule });
-        await store.upsertWorkflowSchedule({ schedule: testSchedule2 });
+        await store.upsertToolSchedule({ schedule: testWorkflowSchedule });
+        await store.upsertToolSchedule({ schedule: testSchedule2 });
 
-        const allSchedules = await store.listWorkflowSchedules({ orgId: testOrgId });
+        const allSchedules = await store.listToolSchedules({ orgId: testOrgId });
         expect(allSchedules).toHaveLength(2);
 
         const scheduleIds = allSchedules.map((s) => s.id);
@@ -530,10 +723,10 @@ if (!testConfig.host || !testConfig.user || !testConfig.password) {
           workflow: testWorkflow,
           orgId: testOrgId,
         });
-        await store.upsertWorkflowSchedule({ schedule: testWorkflowSchedule });
-        await store.upsertWorkflowSchedule({ schedule: futureSchedule });
+        await store.upsertToolSchedule({ schedule: testWorkflowSchedule });
+        await store.upsertToolSchedule({ schedule: futureSchedule });
 
-        const retrieved = await store.listDueWorkflowSchedules();
+        const retrieved = await store.listDueToolSchedules();
 
         expect(retrieved).toHaveLength(1);
         expect(retrieved[0]).toMatchObject({
@@ -556,10 +749,10 @@ if (!testConfig.host || !testConfig.user || !testConfig.password) {
           workflow: testWorkflow,
           orgId: testOrgId,
         });
-        await store.upsertWorkflowSchedule({ schedule: testWorkflowSchedule });
-        await store.upsertWorkflowSchedule({ schedule: disabledSchedule });
+        await store.upsertToolSchedule({ schedule: testWorkflowSchedule });
+        await store.upsertToolSchedule({ schedule: disabledSchedule });
 
-        const retrieved = await store.listDueWorkflowSchedules();
+        const retrieved = await store.listDueToolSchedules();
         expect(retrieved).toHaveLength(1);
         expect(retrieved[0]).toMatchObject({
           ...testWorkflowSchedule,
@@ -570,7 +763,7 @@ if (!testConfig.host || !testConfig.user || !testConfig.password) {
       });
 
       it("should return null for missing workflow schedule", async () => {
-        const retrieved = await store.getWorkflowSchedule({
+        const retrieved = await store.getToolSchedule({
           id: "550e8400-e29b-41d4-a716-446655440005",
           orgId: testOrgId,
         });
@@ -584,7 +777,7 @@ if (!testConfig.host || !testConfig.user || !testConfig.password) {
           workflow: testWorkflow,
           orgId: testOrgId,
         });
-        await store.upsertWorkflowSchedule({ schedule: testWorkflowSchedule });
+        await store.upsertToolSchedule({ schedule: testWorkflowSchedule });
 
         const success = await store.updateScheduleNextRun({
           id: testWorkflowSchedule.id,
@@ -593,8 +786,8 @@ if (!testConfig.host || !testConfig.user || !testConfig.password) {
         });
         expect(success).toBe(true);
 
-        const retrieved = await store.listWorkflowSchedules({
-          workflowId: testWorkflow.id,
+        const retrieved = await store.listToolSchedules({
+          toolId: testWorkflow.id,
           orgId: testOrgId,
         });
 

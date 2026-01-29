@@ -1,4 +1,4 @@
-import { ApiConfig, HttpMethod, Integration, Pagination, ServiceMetadata } from "@superglue/shared";
+import { ApiConfig, HttpMethod, System, Pagination, ServiceMetadata } from "@superglue/shared";
 import { LLMMessage, LLMToolWithContext } from "../llm/llm-base-model.js";
 import { LanguageModel } from "../llm/llm-base-model.js";
 import {
@@ -8,13 +8,12 @@ import {
 } from "../llm/llm-tools.js";
 import { transformData } from "../utils/helpers.js";
 import { z } from "zod";
-import { zodToJsonSchema } from "zod-to-json-schema";
 
 type GenerateStepConfigInput = {
   retryCount: number;
   messages: LLMMessage[];
   sourceData: any;
-  integration: Integration;
+  system: System;
   metadata: ServiceMetadata;
 };
 
@@ -31,7 +30,7 @@ export interface BuildSourceDataInput {
   credentials: Record<string, any>;
   dataSelector?: string;
   currentItem?: any;
-  integrationUrlHost: string;
+  systemUrlHost: string;
   paginationPageSize?: string | number;
 }
 
@@ -109,7 +108,7 @@ export async function generateStepConfig({
   retryCount,
   messages,
   sourceData,
-  integration,
+  system,
   metadata,
 }: GenerateStepConfigInput): Promise<GenerateStepConfigResult> {
   const temperature = Math.min(retryCount * 0.1, 1);
@@ -117,7 +116,7 @@ export async function generateStepConfig({
   const tools: LLMToolWithContext[] = [
     {
       toolDefinition: searchDocumentationToolDefinition,
-      toolContext: { orgId: metadata.orgId, traceId: metadata.traceId, integration },
+      toolContext: { orgId: metadata.orgId, traceId: metadata.traceId, system },
       maxUses: 1,
     },
     { toolDefinition: inspectSourceDataToolDefinition, toolContext: { sourceData }, maxUses: 3 },
@@ -134,7 +133,7 @@ export async function generateStepConfig({
     z.infer<typeof stepConfigSchema>
   >({
     messages,
-    schema: zodToJsonSchema(stepConfigSchema),
+    schema: z.toJSONSchema(stepConfigSchema),
     temperature,
     tools,
     metadata,
@@ -187,7 +186,7 @@ export async function buildSourceData(input: BuildSourceDataInput): Promise<Reco
     credentials,
     dataSelector,
     currentItem: providedCurrentItem,
-    integrationUrlHost,
+    systemUrlHost,
     paginationPageSize,
   } = input;
 
@@ -205,7 +204,7 @@ export async function buildSourceData(input: BuildSourceDataInput): Promise<Reco
     currentItem,
   };
 
-  const isHttp = integrationUrlHost?.startsWith("http");
+  const isHttp = systemUrlHost?.startsWith("http");
 
   if (isHttp) {
     const pageSize = String(paginationPageSize ?? 50);

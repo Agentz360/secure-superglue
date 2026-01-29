@@ -1,7 +1,7 @@
 import { useConfig } from "@/src/app/config-context";
-import { useIntegrations } from "@/src/app/integrations-context";
-import { getAuthBadge } from "@/src/app/integrations/page";
-import { IntegrationForm } from "@/src/components/integrations/IntegrationForm";
+import { useSystems } from "@/src/app/systems-context";
+import { getAuthBadge } from "@/src/app/systems/page";
+import { SystemForm } from "@/src/components/systems/SystemForm";
 import { FileChip } from "@/src/components/ui/FileChip";
 import { useToast } from "@/src/hooks/use-toast";
 import { needsUIToTriggerDocFetch } from "@/src/lib/client-utils";
@@ -11,18 +11,13 @@ import {
   type UploadedFileInfo,
 } from "@/src/lib/file-utils";
 import { useFileUpload } from "./hooks/use-file-upload";
-import {
-  cn,
-  composeUrl,
-  getIntegrationIcon as getIntegrationIconName,
-  getSimpleIcon,
-  inputErrorStyles,
-} from "@/src/lib/general-utils";
+import { SystemIcon } from "@/src/components/ui/system-icon";
+import { cn, composeUrl, getSimpleIcon, inputErrorStyles } from "@/src/lib/general-utils";
 import { tokenRegistry } from "@/src/lib/token-registry";
 import {
   CredentialMode,
-  Integration,
-  IntegrationInput,
+  System,
+  SystemInput,
   Tool,
   UpsertMode,
   SuperglueClient,
@@ -30,9 +25,9 @@ import {
 import {
   ALLOWED_FILE_EXTENSIONS,
   generateDefaultFromSchema,
-  integrationOptions,
+  systemOptions,
 } from "@superglue/shared";
-import { waitForIntegrationProcessing } from "@superglue/shared/utils";
+import { waitForSystemProcessing } from "@superglue/shared/utils";
 import { Validator } from "jsonschema";
 import {
   Check,
@@ -59,10 +54,10 @@ import { Switch } from "../ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "../ui/tabs";
 import { Textarea } from "../ui/textarea";
 
-type ToolBuilderView = "integrations" | "instructions";
+type ToolBuilderView = "systems" | "instructions";
 
 export interface BuildContext {
-  integrationIds: string[];
+  systemIds: string[];
   instruction: string;
   payload: string;
   responseSchema: string;
@@ -74,14 +69,13 @@ export interface BuildContext {
 
 interface ToolBuilderProps {
   initialView?: ToolBuilderView;
-  initialIntegrationIds?: string[];
+  initialSystemIds?: string[];
   initialInstruction?: string;
   initialPayload?: string;
   initialResponseSchema?: string;
   initialInputSchema?: string | null;
   initialFiles?: UploadedFileInfo[];
   onToolBuilt: (tool: Tool, context: BuildContext) => void;
-  mode?: "build" | "rebuild";
 }
 
 const FADE_IN_STYLE = { animationDelay: "0ms", animationFillMode: "backwards" } as const;
@@ -91,7 +85,7 @@ const INACTIVE_FILLED_STYLE = "bg-[#FFD700]/40 border-[#FFA500] text-foreground"
 const ACTIVE_EMPTY_STYLE = "border-foreground/70 text-foreground hover:bg-accent/50";
 const INACTIVE_EMPTY_STYLE = "border-border text-muted-foreground hover:bg-accent/50";
 
-const toIntegrationInput = (i: Integration): IntegrationInput => ({
+const toSystemInput = (i: System): SystemInput => ({
   id: i.id,
   urlHost: i.urlHost,
   urlPath: i.urlPath,
@@ -129,23 +123,21 @@ const getSectionButtonStyle = (hasContent: boolean, isActive: boolean): string =
 };
 
 export function ToolBuilder({
-  initialView = "integrations",
-  initialIntegrationIds = [],
+  initialView = "systems",
+  initialSystemIds = [],
   initialInstruction = "",
   initialPayload = "{}",
   initialResponseSchema = "",
   initialInputSchema = null,
   initialFiles = [],
   onToolBuilt,
-  mode = "build",
 }: ToolBuilderProps) {
   const [view, setView] = useState<ToolBuilderView>(initialView);
   const [isBuilding, setIsBuilding] = useState(false);
   const { toast } = useToast();
   const superglueConfig = useConfig();
 
-  const { integrations, pendingDocIds, loading, setPendingDocIds, refreshIntegrations } =
-    useIntegrations();
+  const { systems, pendingDocIds, loading, setPendingDocIds, refreshSystems } = useSystems();
 
   const [instruction, setInstruction] = useState(initialInstruction);
   const [payload, setPayload] = useState(initialPayload);
@@ -167,17 +159,15 @@ export function ToolBuilder({
     setUploadedFiles,
   } = useFileUpload();
 
-  const [selectedIntegrationIds, setSelectedIntegrationIds] =
-    useState<string[]>(initialIntegrationIds);
+  const [selectedSystemIds, setSelectedSystemIds] = useState<string[]>(initialSystemIds);
 
-  const [integrationSearch, setIntegrationSearch] = useState("");
-  const [showIntegrationForm, setShowIntegrationForm] = useState(false);
-  const [integrationFormEdit, setIntegrationFormEdit] = useState<Integration | null>(null);
+  const [systemSearch, setSystemSearch] = useState("");
+  const [showSystemForm, setShowSystemForm] = useState(false);
+  const [systemFormEdit, setSystemFormEdit] = useState<System | null>(null);
 
   const [validationErrors, setValidationErrors] = useState<Record<string, boolean>>({});
 
   const [showPayloadSection, setShowPayloadSection] = useState(false);
-  const [showFileUploadSection, setShowFileUploadSection] = useState(false);
   const [showResponseSchemaSection, setShowResponseSchemaSection] = useState(false);
   const [isPayloadValid, setIsPayloadValid] = useState(true);
 
@@ -189,16 +179,17 @@ export function ToolBuilder({
       new SuperglueClient({
         endpoint: superglueConfig.superglueEndpoint,
         apiKey: tokenRegistry.getToken(),
+        apiEndpoint: superglueConfig.apiEndpoint,
       }),
-    [superglueConfig.superglueEndpoint],
+    [superglueConfig.superglueEndpoint, superglueConfig.apiEndpoint],
   );
 
-  const waitForIntegrationReady = useCallback(
-    (integrationIds: string[]) => {
+  const waitForSystemReady = useCallback(
+    (systemIds: string[]) => {
       const clientAdapter = {
-        getIntegration: (id: string) => client.getIntegration(id),
+        getSystem: (id: string) => client.getSystem(id),
       };
-      return waitForIntegrationProcessing(clientAdapter, integrationIds);
+      return waitForSystemProcessing(clientAdapter, systemIds);
     },
     [client],
   );
@@ -219,10 +210,8 @@ export function ToolBuilder({
     }
   }, [trimmedPayload]);
 
-  const toggleIntegration = useCallback((id: string) => {
-    setSelectedIntegrationIds((ids) =>
-      ids.includes(id) ? ids.filter((i) => i !== id) : [...ids, id],
-    );
+  const toggleSystem = useCallback((id: string) => {
+    setSelectedSystemIds((ids) => (ids.includes(id) ? ids.filter((i) => i !== id) : [...ids, id]));
   }, []);
 
   const initializePayloadIfEmpty = useCallback(() => {
@@ -233,13 +222,12 @@ export function ToolBuilder({
   }, [payload]);
 
   const handleSectionToggle = useCallback(
-    (section: "payload" | "files" | "schema") => {
+    (section: "payload" | "schema") => {
       if (isBuilding) return;
 
       initializePayloadIfEmpty();
 
       setShowPayloadSection(section === "payload" ? (prev) => !prev : false);
-      setShowFileUploadSection(section === "files" ? (prev) => !prev : false);
       setShowResponseSchemaSection(section === "schema" ? (prev) => !prev : false);
     },
     [isBuilding, initializePayloadIfEmpty],
@@ -252,11 +240,11 @@ export function ToolBuilder({
   }
 
   useEffect(() => {
-    if (view === "instructions" && selectedIntegrationIds.length > 0 && !isGeneratingSuggestions) {
+    if (view === "instructions" && selectedSystemIds.length > 0 && !isGeneratingSuggestions) {
       setSuggestions([]);
       handleGenerateInstructions();
     }
-  }, [selectedIntegrationIds, view, integrations]);
+  }, [selectedSystemIds, view, systems]);
 
   useEffect(() => {
     if (view !== "instructions") {
@@ -301,22 +289,22 @@ export function ToolBuilder({
   }, [payload, inputSchema, filePayloads, enforceInputSchema, inputSchemaMode]);
 
   const handleGenerateInstructions = async () => {
-    if (selectedIntegrationIds.length === 0) return;
+    if (selectedSystemIds.length === 0) return;
 
     setIsGeneratingSuggestions(true);
     try {
-      const selectedIntegrationInputs = selectedIntegrationIds
-        .map((id) => integrations.find((i) => i.id === id))
+      const selectedSystemInputs = selectedSystemIds
+        .map((id) => systems.find((i) => i.id === id))
         .filter(Boolean)
-        .map(toIntegrationInput);
+        .map(toSystemInput);
 
-      if (selectedIntegrationInputs.length === 0) {
+      if (selectedSystemInputs.length === 0) {
         setIsGeneratingSuggestions(false);
         return;
       }
 
       try {
-        const suggestionsText = await client.generateInstructions(selectedIntegrationInputs);
+        const suggestionsText = await client.generateInstructions(selectedSystemInputs);
         setSuggestions(suggestionsText.filter((s) => s.trim()));
       } catch (error: any) {
         toast({
@@ -337,61 +325,55 @@ export function ToolBuilder({
     }
   };
 
-  const handleIntegrationFormSave = async (
-    integration: Integration,
-  ): Promise<Integration | null> => {
-    setShowIntegrationForm(false);
-    setIntegrationFormEdit(null);
+  const handleSystemFormSave = async (system: System): Promise<System | null> => {
+    setShowSystemForm(false);
+    setSystemFormEdit(null);
 
     try {
-      const upsertMode = integrationFormEdit ? UpsertMode.UPDATE : UpsertMode.CREATE;
-      const savedIntegration = await client.upsertIntegration(
-        integration.id,
-        integration,
+      const upsertMode = systemFormEdit ? UpsertMode.UPDATE : UpsertMode.CREATE;
+      const savedSystem = await client.upsertSystem(
+        system.id,
+        system,
         upsertMode,
         CredentialMode.REPLACE,
       );
-      const willTriggerDocFetch = needsUIToTriggerDocFetch(savedIntegration, integrationFormEdit);
+      const willTriggerDocFetch = needsUIToTriggerDocFetch(savedSystem, systemFormEdit);
 
       if (willTriggerDocFetch) {
-        setPendingDocIds((prev) => new Set([...prev, savedIntegration.id]));
+        setPendingDocIds((prev) => new Set([...prev, savedSystem.id]));
 
-        waitForIntegrationReady([savedIntegration.id])
+        waitForSystemReady([savedSystem.id])
           .then(() => {
-            setPendingDocIds(
-              (prev) => new Set([...prev].filter((id) => id !== savedIntegration.id)),
-            );
+            setPendingDocIds((prev) => new Set([...prev].filter((id) => id !== savedSystem.id)));
           })
           .catch((error) => {
             console.error("Error waiting for docs:", error);
-            setPendingDocIds(
-              (prev) => new Set([...prev].filter((id) => id !== savedIntegration.id)),
-            );
+            setPendingDocIds((prev) => new Set([...prev].filter((id) => id !== savedSystem.id)));
           });
       }
 
-      setSelectedIntegrationIds((ids) => {
-        const newIds = ids.filter((id) => id !== (integrationFormEdit?.id || integration.id));
-        newIds.push(savedIntegration.id);
+      setSelectedSystemIds((ids) => {
+        const newIds = ids.filter((id) => id !== (systemFormEdit?.id || system.id));
+        newIds.push(savedSystem.id);
         return newIds;
       });
 
-      await refreshIntegrations();
-      return savedIntegration;
+      await refreshSystems();
+      return savedSystem;
     } catch (error) {
-      console.error("Error saving integration:", error);
+      console.error("Error saving system:", error);
       toast({
-        title: "Error Saving Integration",
-        description: error instanceof Error ? error.message : "Failed to save integration",
+        title: "Error Saving System",
+        description: error instanceof Error ? error.message : "Failed to save system",
         variant: "destructive",
       });
       return null;
     }
   };
 
-  const handleIntegrationFormCancel = () => {
-    setShowIntegrationForm(false);
-    setIntegrationFormEdit(null);
+  const handleSystemFormCancel = () => {
+    setShowSystemForm(false);
+    setSystemFormEdit(null);
   };
 
   const handleBuildTool = async () => {
@@ -422,7 +404,6 @@ export function ToolBuilder({
     }
 
     setShowPayloadSection(false);
-    setShowFileUploadSection(false);
     setShowResponseSchemaSection(false);
     setIsBuilding(true);
 
@@ -432,7 +413,7 @@ export function ToolBuilder({
       const response = await client.buildWorkflow({
         instruction: instruction,
         payload: effectivePayload,
-        integrationIds: selectedIntegrationIds,
+        systemIds: selectedSystemIds,
         responseSchema: responseSchema ? JSON.parse(responseSchema) : null,
         save: false,
       });
@@ -442,7 +423,7 @@ export function ToolBuilder({
       }
 
       const context: BuildContext = {
-        integrationIds: selectedIntegrationIds,
+        systemIds: selectedSystemIds,
         instruction,
         payload,
         responseSchema,
@@ -481,47 +462,47 @@ export function ToolBuilder({
     if (!isPayloadValid && enforceInputSchema && inputSchemaMode === "custom" && inputSchema) {
       return "Input Does Not Match Schema";
     }
-    if (isEmptyPayload) return "Attach JSON Tool Input";
-    return isValidPayloadJson ? "JSON Tool Input Attached" : "Invalid Input JSON";
+    if (isEmptyPayload) return "Attach Tool Input";
+    return isValidPayloadJson ? "Tool Input Attached" : "Invalid Input JSON";
   };
 
-  if (view === "integrations") {
+  if (view === "systems") {
     return (
       <div className="flex items-start justify-center pt-8">
         <div className="w-full max-w-3xl mx-auto space-y-4">
           <div className="text-center mb-6">
             <h2 className="text-xl font-medium text-foreground mb-2">
-              Select integrations for your tool
+              Select systems for your tool
             </h2>
             <p className="text-sm text-muted-foreground">
-              Choose one or more integrations, or choose none to create transform-only tools
+              Choose one or more systems, or choose none to create transform-only tools
             </p>
           </div>
 
           <div className="border rounded-2xl bg-card p-6 space-y-4">
             <div className="flex items-center gap-3">
               <Input
-                placeholder="Search integrations..."
-                value={integrationSearch}
-                onChange={(e) => setIntegrationSearch(e.target.value)}
+                placeholder="Search systems..."
+                value={systemSearch}
+                onChange={(e) => setSystemSearch(e.target.value)}
                 className="h-10 flex-1"
               />
               <Button
                 variant="outline"
                 size="sm"
                 className="h-10 shrink-0"
-                onClick={() => setShowIntegrationForm(true)}
+                onClick={() => setShowSystemForm(true)}
               >
-                <Plus className="mr-2 h-4 w-4" /> Add Integration
+                <Plus className="mr-2 h-4 w-4" /> Add System
               </Button>
             </div>
 
             {loading ? (
               <div className="h-[200px] bg-background" />
-            ) : integrations.length === 0 ? (
+            ) : systems.length === 0 ? (
               <div className="py-16 flex items-center justify-center">
                 <p className="text-sm text-muted-foreground italic">
-                  No integrations added yet. Define the APIs or data sources your tool will use.
+                  No systems added yet. Define the APIs or data sources your tool will use.
                 </p>
               </div>
             ) : (
@@ -531,12 +512,12 @@ export function ToolBuilder({
               >
                 <div className="space-y-2">
                   {(() => {
-                    const filteredIntegrations = integrations.filter(
+                    const filteredSystems = systems.filter(
                       (sys) =>
-                        integrationSearch === "" ||
-                        sys.id.toLowerCase().includes(integrationSearch.toLowerCase()) ||
-                        sys.urlHost.toLowerCase().includes(integrationSearch.toLowerCase()) ||
-                        sys.urlPath.toLowerCase().includes(integrationSearch.toLowerCase()),
+                        systemSearch === "" ||
+                        sys.id.toLowerCase().includes(systemSearch.toLowerCase()) ||
+                        sys.urlHost.toLowerCase().includes(systemSearch.toLowerCase()) ||
+                        sys.urlPath.toLowerCase().includes(systemSearch.toLowerCase()),
                     );
 
                     const colorClasses = {
@@ -547,11 +528,9 @@ export function ToolBuilder({
 
                     return (
                       <>
-                        {filteredIntegrations.map((sys) => {
-                          const selected = selectedIntegrationIds.includes(sys.id);
+                        {filteredSystems.map((sys) => {
+                          const selected = selectedSystemIds.includes(sys.id);
                           const badge = getAuthBadge(sys);
-                          const iconName = getIntegrationIconName(sys);
-                          const icon = iconName ? getSimpleIcon(iconName) : null;
 
                           return (
                             <div
@@ -562,22 +541,14 @@ export function ToolBuilder({
                                   ? "bg-primary/10 dark:bg-primary/40 border border-primary/50 dark:border-primary/60 hover:bg-primary/15 dark:hover:bg-primary/25"
                                   : "bg-muted/30 border border-border hover:bg-muted/50 hover:border-border/80",
                               )}
-                              onClick={() => toggleIntegration(sys.id)}
+                              onClick={() => toggleSystem(sys.id)}
                             >
                               <div className="flex items-center gap-3 flex-1 min-w-0">
-                                {icon ? (
-                                  <svg
-                                    width="20"
-                                    height="20"
-                                    viewBox="0 0 24 24"
-                                    fill={`#${icon.hex}`}
-                                    className="flex-shrink-0"
-                                  >
-                                    <path d={icon.path} />
-                                  </svg>
-                                ) : (
-                                  <Globe className="h-5 w-5 flex-shrink-0 text-foreground" />
-                                )}
+                                <SystemIcon
+                                  system={sys}
+                                  size={20}
+                                  fallbackClassName="text-foreground"
+                                />
                                 <div className="flex flex-col min-w-0">
                                   <span className="font-medium text-sm truncate">{sys.id}</span>
                                   <span className="text-xs text-muted-foreground truncate">
@@ -602,14 +573,14 @@ export function ToolBuilder({
                                   className="h-8 w-8 text-foreground hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed"
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    setIntegrationFormEdit(sys);
-                                    setShowIntegrationForm(true);
+                                    setSystemFormEdit(sys);
+                                    setShowSystemForm(true);
                                   }}
                                   disabled={pendingDocIds.has(sys.id)}
                                   title={
                                     pendingDocIds.has(sys.id)
                                       ? "Documentation is being processed"
-                                      : "Edit integration"
+                                      : "Edit system"
                                   }
                                 >
                                   <Pencil className="h-4 w-4" />
@@ -623,7 +594,7 @@ export function ToolBuilder({
                                   )}
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    toggleIntegration(sys.id);
+                                    toggleSystem(sys.id);
                                   }}
                                 >
                                   {selected && (
@@ -635,10 +606,10 @@ export function ToolBuilder({
                           );
                         })}
 
-                        {filteredIntegrations.length === 0 && integrationSearch.trim() !== "" && (
+                        {filteredSystems.length === 0 && systemSearch.trim() !== "" && (
                           <div
                             className="flex items-center justify-between rounded-md px-4 py-3 transition-all duration-200 cursor-pointer bg-background border border-dashed border-muted-foreground/30 hover:bg-accent/50 hover:border-muted-foreground/50"
-                            onClick={() => setShowIntegrationForm(true)}
+                            onClick={() => setShowSystemForm(true)}
                           >
                             <div className="flex items-center gap-3 flex-1 min-w-0">
                               <div className="h-5 w-5 flex-shrink-0 rounded-full border-2 border-dashed border-muted-foreground/50 flex items-center justify-center">
@@ -646,10 +617,10 @@ export function ToolBuilder({
                               </div>
                               <div className="flex flex-col min-w-0">
                                 <span className="font-medium text-muted-foreground">
-                                  Create "{integrationSearch}" integration
+                                  Create "{systemSearch}" system
                                 </span>
                                 <span className="text-xs text-muted-foreground">
-                                  Add a new integration for this API
+                                  Add a new system for this API
                                 </span>
                               </div>
                             </div>
@@ -660,9 +631,9 @@ export function ToolBuilder({
                                 className="h-8 w-8 text-muted-foreground hover:text-foreground"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  setShowIntegrationForm(true);
+                                  setShowSystemForm(true);
                                 }}
-                                title="Create new integration"
+                                title="Create new system"
                               >
                                 <Plus className="h-4 w-4" />
                               </Button>
@@ -681,26 +652,26 @@ export function ToolBuilder({
                 onClick={() => setView("instructions")}
                 className="h-8 px-4 rounded-full flex-shrink-0"
               >
-                {selectedIntegrationIds.length === 0
+                {selectedSystemIds.length === 0
                   ? "Select None"
-                  : selectedIntegrationIds.length === 1
-                    ? "Select 1 Integration"
-                    : `Select ${selectedIntegrationIds.length} Integrations`}
+                  : selectedSystemIds.length === 1
+                    ? "Select 1 System"
+                    : `Select ${selectedSystemIds.length} Systems`}
               </Button>
             </div>
           </div>
 
-          {showIntegrationForm &&
+          {showSystemForm &&
             typeof document !== "undefined" &&
             createPortal(
               <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
                 <div className="bg-background rounded-xl max-w-2xl w-full p-0">
-                  <IntegrationForm
+                  <SystemForm
                     modal={true}
-                    integration={integrationFormEdit || undefined}
-                    onSave={handleIntegrationFormSave}
-                    onCancel={handleIntegrationFormCancel}
-                    integrationOptions={integrationOptions}
+                    system={systemFormEdit || undefined}
+                    onSave={handleSystemFormSave}
+                    onCancel={handleSystemFormCancel}
+                    systemOptions={systemOptions}
                     getSimpleIcon={getSimpleIcon}
                   />
                 </div>
@@ -723,12 +694,9 @@ export function ToolBuilder({
         </div>
 
         <div className="flex flex-wrap gap-2 justify-center mb-4">
-          {selectedIntegrationIds.map((id) => {
-            const integration = integrations.find((i) => i.id === id);
-            if (!integration) return null;
-
-            const iconName = getIntegrationIconName(integration);
-            const icon = iconName ? getSimpleIcon(iconName) : null;
+          {selectedSystemIds.map((id) => {
+            const system = systems.find((i) => i.id === id);
+            if (!system) return null;
 
             return (
               <button
@@ -736,9 +704,9 @@ export function ToolBuilder({
                 onClick={(e) => {
                   e.preventDefault();
                   if (isBuilding) return;
-                  setSelectedIntegrationIds((ids) => ids.filter((i) => i !== id));
+                  setSelectedSystemIds((ids) => ids.filter((i) => i !== id));
                   setSuggestions([]);
-                  if (selectedIntegrationIds.length > 1) {
+                  if (selectedSystemIds.length > 1) {
                     handleGenerateInstructions();
                   }
                 }}
@@ -751,27 +719,15 @@ export function ToolBuilder({
                 )}
                 title={isBuilding ? "Cannot modify while building" : "Click to remove"}
               >
-                {icon ? (
-                  <svg
-                    width="16"
-                    height="16"
-                    viewBox="0 0 24 24"
-                    fill={`#${icon.hex}`}
-                    className="flex-shrink-0"
-                  >
-                    <path d={icon.path} />
-                  </svg>
-                ) : (
-                  <Globe className="h-4 w-4 flex-shrink-0 text-foreground" />
-                )}
-                <span className="text-sm font-medium max-w-[120px] truncate">{integration.id}</span>
+                <SystemIcon system={system} size={16} fallbackClassName="text-foreground" />
+                <span className="text-sm font-medium max-w-[120px] truncate">{system.id}</span>
                 <X className="h-3 w-3 text-muted-foreground group-hover:text-red-500 transition-colors" />
               </button>
             );
           })}
 
           <button
-            onClick={() => !isBuilding && setView("integrations")}
+            onClick={() => !isBuilding && setView("systems")}
             disabled={isBuilding}
             className={cn(
               "flex items-center gap-2 px-3 py-1.5 rounded-full bg-muted border border-dashed border-border transition-all",
@@ -779,10 +735,10 @@ export function ToolBuilder({
                 ? "opacity-50 cursor-not-allowed"
                 : "hover:bg-muted/80 hover:border-border/80",
             )}
-            title={isBuilding ? "Cannot modify while building" : "Add integrations"}
+            title={isBuilding ? "Cannot modify while building" : "Add systems"}
           >
             <Plus className="h-4 w-4 flex-shrink-0 text-foreground" />
-            <span className="text-sm font-medium">Add Integration</span>
+            <span className="text-sm font-medium">Add System</span>
           </button>
         </div>
 
@@ -815,26 +771,16 @@ export function ToolBuilder({
                 className={cn(
                   "text-xs px-3 py-1.5 rounded-full transition-all flex items-center gap-1.5 border",
                   isBuilding && "opacity-50 cursor-not-allowed",
-                  getSectionButtonStyle(!isEmptyPayload, showPayloadSection),
+                  getSectionButtonStyle(
+                    !isEmptyPayload || uploadedFiles.length > 0,
+                    showPayloadSection,
+                  ),
                 )}
               >
                 <FileJson className="h-4 w-4" />
-                {getPayloadButtonLabel()}
-              </button>
-
-              <button
-                onClick={() => handleSectionToggle("files")}
-                disabled={isBuilding}
-                className={cn(
-                  "text-xs px-3 py-1.5 rounded-full transition-all flex items-center gap-1.5 border",
-                  isBuilding && "opacity-50 cursor-not-allowed",
-                  getSectionButtonStyle(uploadedFiles.length > 0, showFileUploadSection),
-                )}
-              >
-                <Paperclip className="h-4 w-4" />
                 {uploadedFiles.length > 0
-                  ? `File Tool Input Attached (${uploadedFiles.length})`
-                  : "Attach File Tool Input"}
+                  ? `Tool Input (${uploadedFiles.length} file${uploadedFiles.length > 1 ? "s" : ""})`
+                  : getPayloadButtonLabel()}
               </button>
 
               <button
@@ -855,23 +801,17 @@ export function ToolBuilder({
               onClick={handleBuildTool}
               disabled={isBuilding || !instruction.trim() || !isPayloadValid}
               className="h-8 px-4 rounded-full flex-shrink-0 flex items-center gap-2"
-              title={
-                !isPayloadValid
-                  ? "Payload does not match custom input schema"
-                  : mode === "rebuild"
-                    ? "Rebuild Tool"
-                    : "Build Tool"
-              }
+              title={!isPayloadValid ? "Payload does not match custom input schema" : "Build Tool"}
             >
               {isBuilding ? (
                 <>
                   <Loader2 className="h-4 w-4 animate-spin" />
-                  {mode === "rebuild" ? "Rebuilding..." : "Building..."}
+                  Building...
                 </>
               ) : (
                 <>
                   <Wrench className="h-4 w-4" />
-                  {mode === "rebuild" ? "Rebuild" : "Build"}
+                  Build
                 </>
               )}
             </Button>
@@ -888,7 +828,7 @@ export function ToolBuilder({
           >
             <div className="space-y-3">
               <div className="flex items-center justify-between">
-                <h4 className="font-medium text-sm">JSON Tool Input</h4>
+                <h4 className="font-medium text-sm">Tool Input</h4>
                 <div className="flex items-center gap-2">
                   <Label htmlFor="enforce-input-schema" className="text-xs cursor-pointer">
                     Enforce Input Schema
@@ -902,23 +842,135 @@ export function ToolBuilder({
                 </div>
               </div>
 
-              <JsonCodeEditor
-                value={payload}
-                onChange={(val) => {
-                  setPayload(val);
-                  try {
-                    JSON.parse(val || "");
-                    setValidationErrors((prev) => ({ ...prev, payload: false }));
-                  } catch {
-                    setValidationErrors((prev) => ({ ...prev, payload: true }));
+              {uploadedFiles.length > 0 && (
+                <div className="space-y-1.5">
+                  {uploadedFiles.map((file) => (
+                    <FileChip
+                      key={file.key}
+                      file={file}
+                      onRemove={handleFileRemove}
+                      size="default"
+                      rounded="md"
+                      showOriginalName={true}
+                      showKey={true}
+                    />
+                  ))}
+                </div>
+              )}
+
+              <input
+                type="file"
+                multiple
+                accept={ALLOWED_FILE_EXTENSIONS.join(",")}
+                onChange={async (e) => {
+                  const files = Array.from(e.target.files || []);
+                  if (files.length > 0) {
+                    await handleFilesUpload(files);
                   }
+                  e.target.value = "";
                 }}
-                minHeight="150px"
-                maxHeight="300px"
-                resizable={true}
-                placeholder="{}"
-                showValidation={true}
+                className="hidden"
+                id="file-upload-builder"
               />
+
+              {uploadedFiles.length > 0 ? (
+                <div className="flex gap-3">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="text-xs font-medium text-muted-foreground">
+                        Manual Payload
+                      </span>
+                    </div>
+                    <JsonCodeEditor
+                      value={payload}
+                      onChange={(val) => {
+                        setPayload(val);
+                        try {
+                          JSON.parse(val || "");
+                          setValidationErrors((prev) => ({ ...prev, payload: false }));
+                        } catch {
+                          setValidationErrors((prev) => ({ ...prev, payload: true }));
+                        }
+                      }}
+                      minHeight="150px"
+                      maxHeight="250px"
+                      resizable={true}
+                      placeholder="{}"
+                      showValidation={true}
+                    />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="text-xs font-medium text-muted-foreground">
+                        Merged Payload (Read-only)
+                      </span>
+                    </div>
+                    <JsonCodeEditor
+                      value={(() => {
+                        try {
+                          return JSON.stringify(
+                            { ...JSON.parse(payload || "{}"), ...filePayloads },
+                            null,
+                            2,
+                          );
+                        } catch {
+                          return JSON.stringify(filePayloads, null, 2);
+                        }
+                      })()}
+                      readOnly={true}
+                      minHeight="150px"
+                      maxHeight="250px"
+                      resizable={true}
+                      showValidation={false}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <JsonCodeEditor
+                  value={payload}
+                  onChange={(val) => {
+                    setPayload(val);
+                    try {
+                      JSON.parse(val || "");
+                      setValidationErrors((prev) => ({ ...prev, payload: false }));
+                    } catch {
+                      setValidationErrors((prev) => ({ ...prev, payload: true }));
+                    }
+                  }}
+                  minHeight="150px"
+                  maxHeight="300px"
+                  resizable={true}
+                  placeholder="{}"
+                  showValidation={true}
+                />
+              )}
+
+              <div className="flex justify-center pt-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => document.getElementById("file-upload-builder")?.click()}
+                  disabled={isProcessingFiles}
+                  className="h-8 px-4"
+                >
+                  {isProcessingFiles ? (
+                    <>
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                      Processing...
+                    </>
+                  ) : (
+                    <>
+                      <Paperclip className="h-4 w-4 mr-2" />
+                      {uploadedFiles.length > 0 ? "Add More Files" : "Upload Files"}
+                    </>
+                  )}
+                </Button>
+                {uploadedFiles.length > 0 && (
+                  <span className="ml-3 text-xs text-muted-foreground self-center">
+                    {formatBytes(totalFileSize)} / {formatBytes(MAX_TOTAL_FILE_SIZE_TOOLS)}
+                  </span>
+                )}
+              </div>
 
               {!isPayloadValid &&
                 enforceInputSchema &&
@@ -988,69 +1040,6 @@ export function ToolBuilder({
           </div>
         )}
 
-        {showFileUploadSection && (
-          <div
-            className="space-y-3 border rounded-lg p-4 bg-card animate-fade-in mt-3"
-            style={FADE_IN_STYLE}
-          >
-            <div className="space-y-2">
-              <h4 className="font-medium text-sm">File Tool Input</h4>
-              <input
-                type="file"
-                multiple
-                accept={ALLOWED_FILE_EXTENSIONS.join(",")}
-                onChange={async (e) => {
-                  const files = Array.from(e.target.files || []);
-                  if (files.length > 0) {
-                    await handleFilesUpload(files);
-                  }
-                  e.target.value = "";
-                }}
-                className="hidden"
-                id="file-upload-builder"
-              />
-              {uploadedFiles.length > 0 && (
-                <div className="space-y-2 mb-3">
-                  {uploadedFiles.map((file) => (
-                    <FileChip
-                      key={file.key}
-                      file={file}
-                      onRemove={handleFileRemove}
-                      size="default"
-                      rounded="md"
-                      showOriginalName={true}
-                    />
-                  ))}
-                </div>
-              )}
-              <div className="flex flex-col items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => document.getElementById("file-upload-builder")?.click()}
-                  disabled={isProcessingFiles}
-                  className="w-48"
-                >
-                  {isProcessingFiles ? (
-                    <>
-                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                      Processing...
-                    </>
-                  ) : (
-                    <>
-                      <Paperclip className="h-4 w-4 mr-2" />
-                      Select Files
-                    </>
-                  )}
-                </Button>
-                <div className="text-xs text-muted-foreground text-center">
-                  {formatBytes(totalFileSize)} / {formatBytes(MAX_TOTAL_FILE_SIZE_TOOLS)}
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
         {showResponseSchemaSection && (
           <div className="border rounded-lg p-4 bg-card animate-fade-in mt-3" style={FADE_IN_STYLE}>
             <h4 className="font-medium text-sm mb-3">Tool Result Schema</h4>
@@ -1082,7 +1071,6 @@ export function ToolBuilder({
       {suggestions.length > 0 &&
         !instruction.trim() &&
         !showPayloadSection &&
-        !showFileUploadSection &&
         !showResponseSchemaSection && (
           <div className="w-full max-w-4xl space-y-2 mt-4">
             <p className="text-sm text-muted-foreground text-center">Suggestions</p>

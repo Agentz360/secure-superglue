@@ -8,8 +8,13 @@ export interface AuthenticatedFastifyRequest extends FastifyRequest {
   authInfo: {
     orgId: string;
     userId?: string;
+    userEmail?: string;
+    userName?: string;
     orgName?: string;
     orgRole?: UserRole;
+    // EE: API key permission fields
+    isRestricted?: boolean;
+    allowedTools?: string[];
   };
   datastore: DataStore;
   workerPools: WorkerPools;
@@ -21,11 +26,20 @@ export interface RouteHandler {
   (request: AuthenticatedFastifyRequest, reply: FastifyReply): Promise<any>;
 }
 
+// Route-level permission configuration
+export interface RoutePermission {
+  type: "read" | "write" | "execute" | "delete";
+  resource: string;
+  allowRestricted?: boolean; // Can restricted API keys access this route? (default: false)
+  checkResourceId?: "toolId"; // Which param needs allowedTools validation?
+}
+
 export interface RouteConfig {
   method: "GET" | "POST" | "PUT" | "DELETE" | "PATCH";
   path: string;
   handler: RouteHandler;
   schema?: any;
+  permissions?: RoutePermission;
 }
 
 export interface ApiModule {
@@ -65,6 +79,7 @@ export interface OpenAPITool {
   outputSchema?: Record<string, unknown>;
   steps: OpenAPIToolStep[];
   outputTransform?: string;
+  archived?: boolean;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -85,7 +100,7 @@ export interface OpenAPIRunMetadata {
 export interface OpenAPIRun {
   runId: string;
   toolId: string;
-  tool?: { id: string; version?: string };
+  tool?: Record<string, unknown>;
   status: "running" | "success" | "failed" | "aborted";
   toolPayload?: Record<string, unknown>;
   data?: Record<string, unknown>;
@@ -103,6 +118,8 @@ export interface RunToolRequestOptions {
   timeout?: number;
   webhookUrl?: string;
   traceId?: string;
+  // Optional source of the request; currently only 'mcp' is honored; Other sources are derived from the request context.x
+  requestSource?: string;
 }
 
 export interface RunToolRequestBody {
@@ -110,4 +127,14 @@ export interface RunToolRequestBody {
   inputs?: Record<string, unknown>;
   credentials?: Record<string, unknown>;
   options?: RunToolRequestOptions;
+}
+
+// For manual run creation (e.g., playground execution records)
+export interface CreateRunRequestBody {
+  toolId: string;
+  toolConfig: Record<string, unknown>;
+  status: "success" | "failed" | "aborted";
+  error?: string;
+  startedAt: string;
+  completedAt: string;
 }

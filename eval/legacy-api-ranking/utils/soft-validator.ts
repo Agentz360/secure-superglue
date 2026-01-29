@@ -3,7 +3,6 @@ import { logMessage } from '@core/utils/logs.js';
 import { sampleResultObject } from '@/packages/shared/utils.js';
 import { LLMMessage } from '@core/llm/llm-base-model.js';
 import { z } from 'zod';
-import { zodToJsonSchema } from 'zod-to-json-schema';
 
 const softValidationSchema = z.object({
     success: z.boolean().describe('True if the actual result reasonably aligns with the expected criteria (be lenient)'),
@@ -38,7 +37,7 @@ export async function validateWorkflowResult(
             isExpectedJson = false;
         }
 
-        const systemPrompt = `You are a workflow result validator for integration testing. Your job is to determine if the actual workflow result meets the expected criteria.
+        const systemPrompt = `You are a workflow result validator for system testing. Your job is to determine if the actual workflow result meets the expected criteria.
 
 IMPORTANT CONSIDERATIONS:
 - For operations that create, update, delete, or send data (non-retrieval operations), minimal or empty responses often indicate success
@@ -85,7 +84,7 @@ Please validate if the actual result reasonably aligns with the expected criteri
 
         const result = await LanguageModel.generateObject<z.infer<typeof softValidationSchema>>({
             messages,
-            schema: zodToJsonSchema(softValidationSchema),
+            schema: z.toJSONSchema(softValidationSchema),
             temperature: 0.1
         });
 

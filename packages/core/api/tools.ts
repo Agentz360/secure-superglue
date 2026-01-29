@@ -1,10 +1,18 @@
-import { ExecutionStep, RequestOptions, RunStatus, Tool, ToolResult } from "@superglue/shared";
+import {
+  ExecutionStep,
+  RequestOptions,
+  RequestSource,
+  RunStatus,
+  Tool,
+  ToolResult,
+} from "@superglue/shared";
 import { parseJSON } from "../files/index.js";
-import { IntegrationManager } from "../integrations/integration-manager.js";
+import { SystemManager } from "../systems/system-manager.js";
 import { isSelfHealingEnabled } from "../utils/helpers.js";
 import { logMessage } from "../utils/logs.js";
 import { notifyWebhook } from "../utils/webhook.js";
 import type { ToolExecutionPayload } from "../worker/types.js";
+import { filterToolsByPermission } from "./ee/index.js";
 import { registerApiModule } from "./registry.js";
 import {
   addTraceHeader,
@@ -51,7 +59,7 @@ export function mapStepToOpenAPI(step: ExecutionStep): OpenAPIToolStep {
   if (apiConfig.queryParams) result.queryParams = apiConfig.queryParams;
   if (apiConfig.headers) result.headers = apiConfig.headers;
   if (apiConfig.body) result.body = apiConfig.body;
-  if (step.integrationId) result.systemId = step.integrationId;
+  if (step.systemId) result.systemId = step.systemId;
   if (apiConfig.instruction) result.instruction = apiConfig.instruction;
   if (step.modify !== undefined) result.modify = step.modify;
   if (step.loopSelector) result.dataSelector = step.loopSelector;
@@ -79,6 +87,7 @@ export function mapToolToOpenAPI(tool: Tool): OpenAPITool {
     outputSchema: tool.responseSchema as Record<string, unknown>,
     steps: tool.steps.map(mapStepToOpenAPI),
     outputTransform: tool.finalTransform,
+    archived: tool.archived ?? false,
     createdAt: tool.createdAt?.toISOString?.() || (tool.createdAt as unknown as string),
     updatedAt: tool.updatedAt?.toISOString?.() || (tool.updatedAt as unknown as string),
   };
@@ -149,6 +158,7 @@ async function handleWebhook(
   credentials: Record<string, unknown> | undefined,
   options: { timeout?: number } | undefined,
   metadata: { orgId: string; traceId?: string },
+  requestSource: RequestSource,
 ) {
   if (!webhookUrl) return;
 
@@ -168,7 +178,7 @@ async function handleWebhook(
       credentials,
       { ...options, webhookUrl: undefined },
       metadata,
-      "api-chain",
+      RequestSource.TOOL_CHAIN,
     );
   }
 }
@@ -181,7 +191,7 @@ async function executeToolInternal(
   credentials: Record<string, unknown> | undefined,
   options: RequestOptions | undefined,
   metadata: { orgId: string; traceId?: string },
-  requestSource: string,
+  requestSource: RequestSource,
 ): Promise<{ runId: string; result: ToolResult } | null> {
   const tool = await authReq.datastore.getWorkflow({
     id: toolId,
@@ -214,25 +224,24 @@ async function executeToolInternal(
   };
 
   const selfHealingEnabled = isSelfHealingEnabled(requestOptions, "api");
-  const integrationManagers = await IntegrationManager.forToolExecution(
-    tool,
-    authReq.datastore,
-    metadata,
-    { includeDocs: selfHealingEnabled },
-  );
+  const systemManagers = await SystemManager.forToolExecution(tool, authReq.datastore, metadata, {
+    includeDocs: selfHealingEnabled,
+  });
 
   await authReq.datastore.createRun({
     run: {
-      id: runId,
+      runId,
       toolId: tool.id,
-      orgId: authReq.authInfo.orgId,
       status: RunStatus.RUNNING,
-      toolConfig: tool,
+      tool,
       toolPayload: payload,
       options: requestOptions,
       requestSource,
-      startedAt,
+      metadata: {
+        startedAt: startedAt.toISOString(),
+      },
     },
+    orgId: authReq.authInfo.orgId,
   });
 
   const taskPayload: ToolExecutionPayload = {
@@ -241,7 +250,7 @@ async function executeToolInternal(
     payload,
     credentials: credentials as Record<string, string> | undefined,
     options: requestOptions,
-    integrations: integrationManagers.map((m) => m.toIntegrationSync()),
+    systems: systemManagers.map((m) => m.toSystemSync()),
     orgId: authReq.authInfo.orgId,
     traceId: metadata.traceId,
   };
@@ -250,14 +259,19 @@ async function executeToolInternal(
   authReq.workerPools.toolExecution
     .runTask(runId, taskPayload)
     .then(async (result) => {
+      const completedAt = new Date();
       await authReq.datastore.updateRun({
         id: runId,
         orgId: authReq.authInfo.orgId,
         updates: {
           status: result.success ? RunStatus.SUCCESS : RunStatus.FAILED,
-          toolConfig: result.config || tool,
+          tool: result.config || tool,
           error: result.error,
-          completedAt: new Date(),
+          metadata: {
+            startedAt: startedAt.toISOString(),
+            completedAt: completedAt.toISOString(),
+            durationMs: completedAt.getTime() - startedAt.getTime(),
+          },
         },
       });
       handleWebhook(
@@ -269,18 +283,24 @@ async function executeToolInternal(
         credentials,
         options,
         metadata,
+        requestSource,
       );
     })
     .catch(async (error) => {
       logMessage("error", `Tool execution error: ${String(error)}`, metadata);
+      const completedAt = new Date();
       await authReq.datastore.updateRun({
         id: runId,
         orgId: authReq.authInfo.orgId,
         updates: {
           status: RunStatus.FAILED,
-          toolConfig: tool,
+          tool,
           error: String(error),
-          completedAt: new Date(),
+          metadata: {
+            startedAt: startedAt.toISOString(),
+            completedAt: completedAt.toISOString(),
+            durationMs: completedAt.getTime() - startedAt.getTime(),
+          },
         },
       });
     });
@@ -295,6 +315,32 @@ const listTools: RouteHandler = async (request, reply) => {
 
   const { page, limit, offset } = parsePaginationParams(query);
 
+  const isRestricted = authReq.authInfo.isRestricted;
+
+  if (isRestricted) {
+    // Fetch all tools and filter
+    const result = await authReq.datastore.listWorkflows({
+      limit: 10000, // Fetch all
+      offset: 0,
+      orgId: authReq.authInfo.orgId,
+    });
+
+    const filteredItems = filterToolsByPermission(authReq.authInfo, result.items);
+    const total = filteredItems.length;
+    const paginatedItems = filteredItems.slice(offset, offset + limit);
+    const data = paginatedItems.map(mapToolToOpenAPI);
+    const hasMore = offset + paginatedItems.length < total;
+
+    return addTraceHeader(reply, authReq.traceId).code(200).send({
+      data,
+      page,
+      limit,
+      total,
+      hasMore,
+    });
+  }
+
+  // Unrestricted keys use normal pagination
   const result = await authReq.datastore.listWorkflows({
     limit,
     offset,
@@ -340,6 +386,18 @@ const runTool: RouteHandler = async (request, reply) => {
   const metadata = { orgId: authReq.authInfo.orgId, traceId };
   const runId = body.runId || crypto.randomUUID();
 
+  // Source attribution:
+  // - default: api
+  // - frontend: if auth indicates a user context (not a raw API key)
+  // - mcp: only if client explicitly asks for it; everything else ignored
+  let requestSource: RequestSource = RequestSource.API;
+  if (authReq.authInfo.userId) {
+    requestSource = RequestSource.FRONTEND;
+  }
+  if (body.options?.requestSource === RequestSource.MCP) {
+    requestSource = RequestSource.MCP;
+  }
+
   // Idempotency check
   if (body.runId) {
     const existingRun = await authReq.datastore.getRun({
@@ -379,25 +437,24 @@ const runTool: RouteHandler = async (request, reply) => {
   };
 
   const selfHealingEnabled = isSelfHealingEnabled(requestOptions, "api");
-  const integrationManagers = await IntegrationManager.forToolExecution(
-    tool,
-    authReq.datastore,
-    metadata,
-    { includeDocs: selfHealingEnabled },
-  );
+  const systemManagers = await SystemManager.forToolExecution(tool, authReq.datastore, metadata, {
+    includeDocs: selfHealingEnabled,
+  });
 
   await authReq.datastore.createRun({
     run: {
-      id: runId,
+      runId,
       toolId: tool.id,
-      orgId: authReq.authInfo.orgId,
       status: RunStatus.RUNNING,
-      toolConfig: tool,
+      tool,
       toolPayload: body.inputs as Record<string, any>,
       options: requestOptions,
-      requestSource: "api",
-      startedAt,
+      requestSource,
+      metadata: {
+        startedAt: startedAt.toISOString(),
+      },
     },
+    orgId: authReq.authInfo.orgId,
   });
 
   const taskPayload: ToolExecutionPayload = {
@@ -406,7 +463,7 @@ const runTool: RouteHandler = async (request, reply) => {
     payload: body.inputs,
     credentials: body.credentials as Record<string, string> | undefined,
     options: requestOptions,
-    integrations: integrationManagers.map((m) => m.toIntegrationSync()),
+    systems: systemManagers.map((m) => m.toSystemSync()),
     orgId: authReq.authInfo.orgId,
     traceId: metadata.traceId,
   };
@@ -420,14 +477,19 @@ const runTool: RouteHandler = async (request, reply) => {
     authReq.workerPools.toolExecution
       .runTask(runId, taskPayload)
       .then(async (result) => {
+        const completedAt = new Date();
         await authReq.datastore.updateRun({
           id: runId,
           orgId: authReq.authInfo.orgId,
           updates: {
             status: result.success ? RunStatus.SUCCESS : RunStatus.FAILED,
-            toolConfig: result.config || tool,
+            tool: result.config || tool,
             error: result.error,
-            completedAt: new Date(),
+            metadata: {
+              startedAt: startedAt.toISOString(),
+              completedAt: completedAt.toISOString(),
+              durationMs: completedAt.getTime() - startedAt.getTime(),
+            },
           },
         });
         handleWebhook(
@@ -439,18 +501,24 @@ const runTool: RouteHandler = async (request, reply) => {
           body.credentials,
           body.options,
           metadata,
+          requestSource,
         );
       })
       .catch(async (error) => {
         logMessage("error", `Async tool execution error: ${String(error)}`, metadata);
+        const completedAt = new Date();
         await authReq.datastore.updateRun({
           id: runId,
           orgId: authReq.authInfo.orgId,
           updates: {
             status: RunStatus.FAILED,
-            toolConfig: tool,
+            tool,
             error: String(error),
-            completedAt: new Date(),
+            metadata: {
+              startedAt: startedAt.toISOString(),
+              completedAt: completedAt.toISOString(),
+              durationMs: completedAt.getTime() - startedAt.getTime(),
+            },
           },
         });
       });
@@ -463,7 +531,7 @@ const runTool: RouteHandler = async (request, reply) => {
         status: RunStatus.RUNNING,
         toolPayload: body.inputs,
         options: requestOptions,
-        requestSource: "api",
+        requestSource,
         traceId: metadata.traceId,
         startedAt,
       }),
@@ -481,9 +549,13 @@ const runTool: RouteHandler = async (request, reply) => {
       orgId: authReq.authInfo.orgId,
       updates: {
         status,
-        toolConfig: result.config || tool,
+        tool: result.config || tool,
         error: result.error,
-        completedAt,
+        metadata: {
+          startedAt: startedAt.toISOString(),
+          completedAt: completedAt.toISOString(),
+          durationMs: completedAt.getTime() - startedAt.getTime(),
+        },
       },
     });
     handleWebhook(
@@ -495,6 +567,7 @@ const runTool: RouteHandler = async (request, reply) => {
       body.credentials,
       body.options,
       metadata,
+      requestSource,
     );
 
     return sendResponse(
@@ -508,7 +581,7 @@ const runTool: RouteHandler = async (request, reply) => {
         error: result.error,
         stepResults: result.stepResults,
         options: requestOptions,
-        requestSource: "api",
+        requestSource,
         traceId: metadata.traceId,
         startedAt,
         completedAt,
@@ -525,9 +598,13 @@ const runTool: RouteHandler = async (request, reply) => {
       orgId: authReq.authInfo.orgId,
       updates: {
         status,
-        toolConfig: tool,
+        tool,
         error: String(error),
-        completedAt,
+        metadata: {
+          startedAt: startedAt.toISOString(),
+          completedAt: completedAt.toISOString(),
+          durationMs: completedAt.getTime() - startedAt.getTime(),
+        },
       },
     });
 
@@ -540,7 +617,7 @@ const runTool: RouteHandler = async (request, reply) => {
         toolPayload: body.inputs,
         error: String(error),
         options: requestOptions,
-        requestSource: "api",
+        requestSource,
         traceId: metadata.traceId,
         startedAt,
         completedAt,
@@ -556,16 +633,29 @@ registerApiModule({
       method: "GET",
       path: "/tools",
       handler: listTools,
+      permissions: { type: "read", resource: "tool", allowRestricted: true },
     },
     {
       method: "GET",
       path: "/tools/:toolId",
       handler: getTool,
+      permissions: {
+        type: "read",
+        resource: "tool",
+        allowRestricted: true,
+        checkResourceId: "toolId",
+      },
     },
     {
       method: "POST",
       path: "/tools/:toolId/run",
       handler: runTool,
+      permissions: {
+        type: "execute",
+        resource: "tool",
+        allowRestricted: true,
+        checkResourceId: "toolId",
+      },
     },
   ],
 });

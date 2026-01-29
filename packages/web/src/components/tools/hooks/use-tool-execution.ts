@@ -1,4 +1,3 @@
-import { useRef } from "react";
 import { useConfig } from "@/src/app/config-context";
 import { useToast } from "@/src/hooks/use-toast";
 import {
@@ -16,7 +15,8 @@ import {
   isAbortError,
   wrapLoopSelectorWithLimit,
 } from "@/src/lib/general-utils";
-import { ExecutionStep, Tool, ToolResult } from "@superglue/shared";
+import { Tool, ToolResult } from "@superglue/shared";
+import { useRef } from "react";
 import { useExecution, useToolConfig } from "../context";
 import type { StepStatus, TransformStatus } from "../context/types";
 
@@ -47,7 +47,7 @@ export function useToolExecution(
 
   const config = useConfig();
   const { toast } = useToast();
-  const { tool, steps, payload, setSteps, setFinalTransform } = useToolConfig();
+  const { tool, steps, payload, setSteps, setFinalTransform, responseFilters } = useToolConfig();
   const toolId = tool.id;
   const finalTransform = tool.finalTransform || "";
   const responseSchema = tool.responseSchema ? JSON.stringify(tool.responseSchema) : "";
@@ -75,27 +75,15 @@ export function useToolExecution(
 
   const handleStopExecution = async () => {
     if (shouldDebounceAbort(lastAbortTimeRef.current)) return;
-    if (!currentRunIdRef.current || executionCompletedRef.current) return;
 
     lastAbortTimeRef.current = Date.now();
     shouldAbortRef.current = true;
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
-
-    if (!currentRunIdRef.current || executionCompletedRef.current) return;
-
-    const client = createSuperglueClient(config.superglueEndpoint);
-    const success = await abortExecution(client, currentRunIdRef.current);
-
-    if (executionCompletedRef.current) return;
-
-    if (success) {
+    const runIdToAbort = currentRunIdRef.current;
+    if (runIdToAbort) {
       markAsStopping();
-      currentRunIdRef.current = null;
-      toast({
-        title: "Execution aborted",
-        description: "Tool execution has been aborted",
-      });
+      const client = createSuperglueClient(config.superglueEndpoint, config.apiEndpoint);
+      await abortExecution(client, runIdToAbort);
     }
 
     if (embedded && onStopExecution) {
@@ -132,7 +120,7 @@ export function useToolExecution(
 
     return executeWithRunId(
       async () => {
-        const client = createSuperglueClient(config.superglueEndpoint);
+        const client = createSuperglueClient(config.superglueEndpoint, config.apiEndpoint);
 
         const originalLoopSelector = steps[idx]?.loopSelector;
         let stepToExecute = steps[idx];
@@ -219,7 +207,7 @@ export function useToolExecution(
       });
 
       const parsedSchema = schemaStr && schemaStr.trim() ? JSON.parse(schemaStr) : null;
-      const client = createSuperglueClient(config.superglueEndpoint);
+      const client = createSuperglueClient(config.superglueEndpoint, config.apiEndpoint);
       const result = await executeFinalTransform(
         client,
         toolId || "test",
@@ -232,6 +220,7 @@ export function useToolExecution(
         (transformRunId) => {
           currentRunIdRef.current = transformRunId;
         },
+        responseFilters,
       );
 
       if (result.success) {
@@ -265,6 +254,7 @@ export function useToolExecution(
     handleBeforeStepExecution: (stepIndex: number, step: any) => Promise<boolean>,
   ) => {
     const runId = generateUUID();
+    const startedAt = new Date();
     executionCompletedRef.current = false;
     shouldAbortRef.current = false;
     currentRunIdRef.current = runId;
@@ -272,6 +262,10 @@ export function useToolExecution(
     setLoading(true);
     clearAllExecutions();
     setFocusStepId(null);
+
+    let finalToolConfig: Tool | null = null;
+    let runStatus: "success" | "failed" | "aborted" = "success";
+    let runError: string | undefined;
 
     try {
       JSON.parse(responseSchema || "{}");
@@ -288,13 +282,14 @@ export function useToolExecution(
         finalTransform,
         responseSchema: currentResponseSchema,
         inputSchema: inputSchema ? JSON.parse(inputSchema) : null,
+        responseFilters,
       } as any;
 
       const originalStepsJson = JSON.stringify(executionSteps);
 
       setCurrentExecutingStepIndex(0);
 
-      const client = createSuperglueClient(config.superglueEndpoint);
+      const client = createSuperglueClient(config.superglueEndpoint, config.apiEndpoint);
       const state = await executeToolStepByStep(
         client,
         executionTool,
@@ -388,6 +383,7 @@ export function useToolExecution(
 
       if (state.failedSteps.length === 0 && state.abortedSteps.length === 0 && !state.interrupted) {
         setNavigateToFinalSignal(Date.now());
+        runStatus = "success";
       } else {
         const firstProblematicStep = state.failedSteps[0] || state.abortedSteps[0];
         if (firstProblematicStep) {
@@ -404,18 +400,27 @@ export function useToolExecution(
             setShowStepOutputSignal(Date.now());
           }
         }
+
+        if (state.abortedSteps.length > 0) {
+          runStatus = "aborted";
+        } else if (state.failedSteps.length > 0) {
+          runStatus = "failed";
+          runError = state.stepResults[state.failedSteps[0]]?.error;
+        }
       }
 
+      // Set the final tool config for run creation
+      finalToolConfig = {
+        id: toolId,
+        steps: state.currentTool.steps,
+        finalTransform: state.currentTool.finalTransform || finalTransform,
+        responseSchema: currentResponseSchema,
+        inputSchema: inputSchema ? JSON.parse(inputSchema) : null,
+        instruction: instructions,
+      } as Tool;
+
       if (onExecute) {
-        const executedTool = {
-          id: toolId,
-          steps: executionSteps,
-          finalTransform: state.currentTool.finalTransform || finalTransform,
-          responseSchema: currentResponseSchema,
-          inputSchema: inputSchema ? JSON.parse(inputSchema) : null,
-          instruction: instructions,
-        } as Tool;
-        onExecute(executedTool, wr);
+        onExecute(finalToolConfig, wr);
       }
     } catch (error: any) {
       console.error("Error executing tool:", error);
@@ -424,7 +429,38 @@ export function useToolExecution(
         description: error.message,
         variant: "destructive",
       });
+      runStatus = "failed";
+      runError = error.message;
     } finally {
+      const completedAt = new Date();
+
+      // Create run entry in database after execution completes
+      if (finalToolConfig || toolId) {
+        try {
+          const client = createSuperglueClient(config.superglueEndpoint, config.apiEndpoint);
+          await client.createRun({
+            toolId,
+            toolConfig:
+              finalToolConfig ||
+              ({
+                id: toolId,
+                steps,
+                finalTransform,
+                responseSchema: responseSchema ? JSON.parse(responseSchema) : null,
+                inputSchema: inputSchema ? JSON.parse(inputSchema) : null,
+                instruction: instructions,
+              } as Tool),
+            status: runStatus,
+            error: runError,
+            startedAt,
+            completedAt,
+          });
+        } catch (createRunError) {
+          // Don't fail the execution if run creation fails, just log it
+          console.error("Failed to create run entry:", createRunError);
+        }
+      }
+
       executionCompletedRef.current = true;
       currentRunIdRef.current = null;
       setLoading(false);

@@ -1,33 +1,390 @@
 "use client";
+
+import { useSystems } from "@/src/app/systems-context";
+import { Button } from "@/src/components/ui/button";
+import { Input } from "@/src/components/ui/input";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/src/components/ui/table";
+import { FolderSelector, useFolderFilter } from "@/src/components/tools/folders/FolderSelector";
+import { InlineFolderPicker } from "@/src/components/tools/folders/InlineFolderPicker";
+import { CopyButton } from "@/src/components/tools/shared/CopyButton";
+import { ToolActionsMenu } from "@/src/components/tools/ToolActionsMenu";
 import { ToolCreateStepper } from "@/src/components/tools/ToolCreateStepper";
-import { useSearchParams } from "next/navigation";
+import { SystemIcon } from "@/src/components/ui/system-icon";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/src/components/ui/tooltip";
+import {
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
+  Hammer,
+  Loader2,
+  Plus,
+  RotateCw,
+  Search,
+} from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { useTools } from "../tools-context";
 
-export default function NewToolPage() {
+type SortColumn = "id" | "folder" | "instruction" | "updatedAt";
+type SortDirection = "asc" | "desc";
+
+const ToolsTable = () => {
+  const router = useRouter();
   const searchParams = useSearchParams();
+  const { tools, isInitiallyLoading, isRefreshing, refreshTools } = useTools();
+  const { systems } = useSystems();
 
-  // - integration=single-id (for preselecting one)
-  // - integrations=id1,id2,id3 (for preselecting multiple)
-  const singleIntegration = searchParams.get("integration");
-  const multipleIntegrations = searchParams.get("integrations");
+  const systemFromUrl = searchParams.get("system");
 
-  let integrationIds: string[] = [];
-  if (multipleIntegrations) {
-    integrationIds = multipleIntegrations
-      .split(",")
-      .map((id) => id.trim())
-      .filter(Boolean);
-  } else if (singleIntegration) {
-    integrationIds = [singleIntegration.trim()];
+  const [searchTerm, setSearchTerm] = useState("");
+  const [debouncedSearchTerm, setDebouncedSearchTerm] = useState("");
+  const [manuallyOpenedStepper, setManuallyOpenedStepper] = useState(!!systemFromUrl);
+
+  const [hasCompletedInitialLoad, setHasCompletedInitialLoad] = useState(false);
+  const [sortColumn, setSortColumn] = useState<SortColumn>("updatedAt");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+
+  const { selectedFolder, setSelectedFolder, filteredByFolder } = useFolderFilter(tools);
+
+  // Debounce search term
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearchTerm(searchTerm);
+    }, 150);
+    return () => clearTimeout(timer);
+  }, [searchTerm]);
+
+  // Memoize filtered and sorted configs
+  const currentConfigs = useMemo(() => {
+    let filtered = filteredByFolder.filter((config) => {
+      if (!config) return false;
+
+      if (debouncedSearchTerm) {
+        const searchLower = debouncedSearchTerm.toLowerCase();
+        // Only search relevant fields instead of entire object
+        const searchableText = [config.id, config.folder, config.instruction]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+
+        if (!searchableText.includes(searchLower)) return false;
+      }
+
+      return true;
+    });
+
+    filtered = [...filtered].sort((a, b) => {
+      const dir = sortDirection === "asc" ? 1 : -1;
+      switch (sortColumn) {
+        case "id":
+          return dir * a.id.localeCompare(b.id);
+        case "folder":
+          return dir * (a.folder || "").localeCompare(b.folder || "");
+        case "instruction":
+          return dir * (a.instruction || "").localeCompare(b.instruction || "");
+        case "updatedAt":
+          return (
+            dir *
+            (new Date(a.updatedAt || a.createdAt).getTime() -
+              new Date(b.updatedAt || b.createdAt).getTime())
+          );
+        default:
+          return 0;
+      }
+    });
+
+    return filtered;
+  }, [filteredByFolder, debouncedSearchTerm, sortColumn, sortDirection]);
+
+  const refreshConfigs = useCallback(() => {
+    refreshTools();
+  }, [refreshTools]);
+
+  const handleTool = () => {
+    setManuallyOpenedStepper(true);
+  };
+
+  const handlePlayTool = (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    // Navigate to the tool page, passing the ID. The user can then run it.
+    router.push(`/tools/${encodeURIComponent(id)}`);
+  };
+
+  const handleSort = (column: SortColumn) => {
+    if (sortColumn === column) {
+      setSortDirection((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortColumn(column);
+      setSortDirection(column === "updatedAt" ? "desc" : "asc");
+    }
+  };
+
+  const SortIcon = ({ column }: { column: SortColumn }) => {
+    if (sortColumn !== column) return <ArrowUpDown className="ml-1 h-3 w-3 opacity-50" />;
+    return sortDirection === "asc" ? (
+      <ArrowUp className="ml-1 h-3 w-3" />
+    ) : (
+      <ArrowDown className="ml-1 h-3 w-3" />
+    );
+  };
+
+  useEffect(() => {
+    if (!isInitiallyLoading && !hasCompletedInitialLoad) {
+      setHasCompletedInitialLoad(true);
+    }
+  }, [isInitiallyLoading, hasCompletedInitialLoad]);
+
+  const shouldShowStepper =
+    manuallyOpenedStepper || (hasCompletedInitialLoad && tools.length === 0);
+
+  if (shouldShowStepper) {
+    return (
+      <div className="max-w-none w-full min-h-full">
+        <ToolCreateStepper
+          onComplete={() => {
+            setManuallyOpenedStepper(false);
+            // Clear the system param from URL when closing
+            if (systemFromUrl) {
+              router.replace("/tools");
+            }
+            refreshConfigs();
+          }}
+          initialSystemIds={systemFromUrl ? [systemFromUrl] : []}
+          initialView={systemFromUrl ? "instructions" : "systems"}
+        />
+      </div>
+    );
   }
 
-  // Parse skip param: skip=integrations means skip integration selection, go straight to instructions
-  const skipParam = searchParams.get("skip");
-  const initialView = skipParam === "integrations" ? "instructions" : "integrations";
-
   return (
-    <ToolCreateStepper
-      initialIntegrationIds={integrationIds}
-      initialView={initialView as "integrations" | "instructions"}
-    />
+    <div className="p-8 max-w-none w-full h-full flex flex-col overflow-hidden">
+      <div className="flex flex-col lg:flex-row justify-between lg:items-center mb-6 gap-2 flex-shrink-0">
+        <h1 className="text-2xl font-bold">Tools</h1>
+        <div className="flex gap-4">
+          <Button onClick={handleTool}>
+            <Plus className="mr-2 h-4 w-4" />
+            Create
+          </Button>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap gap-3 mb-4 flex-shrink-0">
+        <FolderSelector
+          tools={tools}
+          selectedFolder={selectedFolder}
+          onFolderChange={setSelectedFolder}
+        />
+        <div className="relative flex-1 min-w-[200px]">
+          <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Input
+            placeholder="Search by ID or details..."
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            className="pl-10"
+          />
+        </div>
+      </div>
+
+      <div className="border rounded-lg flex-1 overflow-auto">
+        <Table>
+          <TableHeader className="sticky top-0 bg-background z-10">
+            <TableRow>
+              <TableHead className="w-[60px]"></TableHead>
+              <TableHead
+                className="cursor-pointer hover:bg-muted/50 select-none"
+                onClick={() => handleSort("id")}
+              >
+                <div className="flex items-center">
+                  ID
+                  <SortIcon column="id" />
+                </div>
+              </TableHead>
+              <TableHead
+                className="cursor-pointer hover:bg-muted/50 select-none"
+                onClick={() => handleSort("folder")}
+              >
+                <div className="flex items-center">
+                  Folder
+                  <SortIcon column="folder" />
+                </div>
+              </TableHead>
+              <TableHead
+                className="cursor-pointer hover:bg-muted/50 select-none"
+                onClick={() => handleSort("instruction")}
+              >
+                <div className="flex items-center">
+                  Instructions
+                  <SortIcon column="instruction" />
+                </div>
+              </TableHead>
+              <TableHead
+                className="cursor-pointer hover:bg-muted/50 select-none"
+                onClick={() => handleSort("updatedAt")}
+              >
+                <div className="flex items-center">
+                  Updated At
+                  <SortIcon column="updatedAt" />
+                </div>
+              </TableHead>
+              <TableHead className="text-right">
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={refreshConfigs}
+                        className="transition-transform"
+                      >
+                        <RotateCw className={`h-4 w-4 ${isRefreshing ? "animate-spin" : ""}`} />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <p>Refresh Tools</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              </TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {isInitiallyLoading && tools.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={6} className="h-24 text-center">
+                  <Loader2 className="h-6 w-6 animate-spin text-foreground inline-block" />
+                </TableCell>
+              </TableRow>
+            ) : currentConfigs.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={6} className="h-24 text-center">
+                  <div className="flex flex-col items-center gap-2 text-muted-foreground">
+                    <span>
+                      {selectedFolder !== "all" ? "No tools in this folder" : "No results found"}
+                    </span>
+                    {selectedFolder !== "all" && (
+                      <Button variant="outline" size="sm" onClick={() => setSelectedFolder("all")}>
+                        Show all tools
+                      </Button>
+                    )}
+                  </div>
+                </TableCell>
+              </TableRow>
+            ) : (
+              currentConfigs.map((tool) => {
+                const allSystemIds = new Set<string>();
+
+                if (tool.systemIds) {
+                  tool.systemIds.forEach((id) => allSystemIds.add(id));
+                }
+
+                if (tool.steps) {
+                  tool.steps.forEach((step: any) => {
+                    if (step.systemId) {
+                      allSystemIds.add(step.systemId);
+                    }
+                  });
+                }
+
+                const systemIdsArray = Array.from(allSystemIds);
+
+                return (
+                  <TableRow key={tool.id} className="hover:bg-secondary">
+                    <TableCell className="w-[60px]">
+                      {systemIdsArray.length > 0 ? (
+                        <div className="flex items-center justify-center gap-1 flex-shrink-0">
+                          {systemIdsArray.map((systemId: string) => {
+                            const system = systems.find((s) => s.id === systemId);
+                            if (!system) return null;
+                            return (
+                              <TooltipProvider key={systemId}>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <span>
+                                      <SystemIcon system={system} size={14} />
+                                    </span>
+                                  </TooltipTrigger>
+                                  <TooltipContent>
+                                    <p>{system.id}</p>
+                                  </TooltipContent>
+                                </Tooltip>
+                              </TooltipProvider>
+                            );
+                          })}
+                        </div>
+                      ) : null}
+                    </TableCell>
+                    <TableCell className="font-medium max-w-[200px] truncate relative group">
+                      <div className="flex items-center space-x-1">
+                        <TooltipProvider>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span className="truncate">{tool.id}</span>
+                            </TooltipTrigger>
+                            <TooltipContent>
+                              <p>{tool.id}</p>
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                        <div className="opacity-0 group-hover:opacity-100 transition-opacity">
+                          <CopyButton text={tool.id} />
+                        </div>
+                      </div>
+                    </TableCell>
+                    <TableCell className="w-[200px] min-w-[200px] max-w-[400px]">
+                      <InlineFolderPicker tool={tool} />
+                    </TableCell>
+                    <TableCell className="max-w-[300px] truncate relative group">
+                      <div className="flex items-center space-x-1">
+                        <span className="truncate">{tool.instruction}</span>
+                        {tool.instruction && (
+                          <div className="opacity-0 group-hover:opacity-100 transition-opacity">
+                            <CopyButton text={tool.instruction} />
+                          </div>
+                        )}
+                      </div>
+                    </TableCell>
+                    <TableCell className="w-[150px]">
+                      {tool.updatedAt
+                        ? new Date(tool.updatedAt).toLocaleDateString()
+                        : tool.createdAt
+                          ? new Date(tool.createdAt).toLocaleDateString()
+                          : ""}
+                    </TableCell>
+                    <TableCell className="w-[140px]">
+                      <div className="flex justify-end gap-2">
+                        <Button
+                          variant="default"
+                          size="sm"
+                          onClick={(e) => handlePlayTool(e, tool.id)}
+                          className="gap-2"
+                        >
+                          <Hammer className="h-4 w-4" />
+                          View
+                        </Button>
+                        <ToolActionsMenu tool={tool} />
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                );
+              })
+            )}
+          </TableBody>
+        </Table>
+      </div>
+    </div>
   );
-}
+};
+
+export default ToolsTable;

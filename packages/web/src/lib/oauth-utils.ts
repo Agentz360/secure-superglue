@@ -1,6 +1,5 @@
-import type { Integration } from "@superglue/shared";
-import { SuperglueClient } from "@superglue/shared";
-import { resolveOAuthCertAndKey } from "@superglue/shared";
+import type { System } from "@superglue/shared";
+import { resolveOAuthCertAndKey, SuperglueClient, systems } from "@superglue/shared";
 
 type OAuthFields = {
   client_id: string;
@@ -14,7 +13,7 @@ type OAuthFields = {
 };
 
 export type OAuthState = {
-  integrationId: string;
+  systemId: string;
   timestamp: number;
   redirectUri: string;
   token_url: string;
@@ -25,6 +24,9 @@ export type OAuthState = {
   oauth_cert?: string;
   oauth_key?: string;
   scopes?: string;
+  tokenAuthMethod?: "body" | "basic_auth";
+  tokenContentType?: "form" | "json";
+  extraHeaders?: Record<string, string>;
 };
 
 type OAuthCallbacks = {
@@ -37,14 +39,40 @@ export const getOAuthCallbackUrl = (): string => {
   return `${baseUrl}/api/auth/callback`;
 };
 
-export const buildOAuthFieldsFromIntegration = (integration: Integration) => {
-  const hasRefreshToken = !!integration.credentials?.refresh_token;
+// PKCE helpers
+const generateCodeVerifier = (): string => {
+  const array = new Uint8Array(32);
+  crypto.getRandomValues(array);
+  return btoa(String.fromCharCode(...array))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+};
+
+const generateCodeChallenge = async (verifier: string): Promise<string> => {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(verifier);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return btoa(String.fromCharCode(...new Uint8Array(digest)))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+};
+
+const shouldUsePKCE = (templateId?: string): boolean => {
+  if (!templateId) return false;
+  const template = systems[templateId];
+  return template?.oauth?.usePKCE === true;
+};
+
+export const buildOAuthFieldsFromSystem = (system: System) => {
+  const hasRefreshToken = !!system.credentials?.refresh_token;
   const derivedGrantType =
-    integration.credentials?.grant_type ||
+    system.credentials?.grant_type ||
     (hasRefreshToken ? "authorization_code" : "client_credentials");
 
-  let oauth_cert = integration.credentials?.oauth_cert;
-  let oauth_key = integration.credentials?.oauth_key;
+  let oauth_cert = system.credentials?.oauth_cert;
+  let oauth_key = system.credentials?.oauth_key;
 
   if (oauth_cert && oauth_key) {
     const { cert, key } = resolveOAuthCertAndKey(oauth_cert, oauth_key);
@@ -53,13 +81,13 @@ export const buildOAuthFieldsFromIntegration = (integration: Integration) => {
   }
 
   return {
-    access_token: integration.credentials?.access_token,
-    refresh_token: integration.credentials?.refresh_token,
-    client_id: integration.credentials?.client_id,
-    client_secret: integration.credentials?.client_secret,
-    scopes: integration.credentials?.scopes,
-    auth_url: integration.credentials?.auth_url,
-    token_url: integration.credentials?.token_url,
+    access_token: system.credentials?.access_token,
+    refresh_token: system.credentials?.refresh_token,
+    client_id: system.credentials?.client_id,
+    client_secret: system.credentials?.client_secret,
+    scopes: system.credentials?.scopes,
+    auth_url: system.credentials?.auth_url,
+    token_url: system.credentials?.token_url,
     grant_type: derivedGrantType,
     oauth_cert,
     oauth_key,
@@ -67,7 +95,7 @@ export const buildOAuthFieldsFromIntegration = (integration: Integration) => {
 };
 
 const buildOAuthState = (params: {
-  integrationId: string;
+  systemId: string;
   apiKey: string;
   tokenUrl: string;
   templateId?: string;
@@ -77,9 +105,12 @@ const buildOAuthState = (params: {
   oauth_cert?: string;
   oauth_key?: string;
   scopes?: string;
+  tokenAuthMethod?: "body" | "basic_auth";
+  tokenContentType?: "form" | "json";
+  extraHeaders?: Record<string, string>;
 }): OAuthState => {
   return {
-    integrationId: params.integrationId,
+    systemId: params.systemId,
     timestamp: Date.now(),
     redirectUri: getOAuthCallbackUrl(),
     token_url: params.tokenUrl,
@@ -90,15 +121,19 @@ const buildOAuthState = (params: {
     ...(params.oauth_cert && { oauth_cert: params.oauth_cert }),
     ...(params.oauth_key && { oauth_key: params.oauth_key }),
     ...(params.scopes && { scopes: params.scopes }),
+    ...(params.tokenAuthMethod && { tokenAuthMethod: params.tokenAuthMethod }),
+    ...(params.tokenContentType && { tokenContentType: params.tokenContentType }),
+    ...(params.extraHeaders && { extraHeaders: params.extraHeaders }),
   };
 };
 
-const buildAuthorizationUrl = (params: {
+const buildAuthorizationUrl = async (params: {
   authUrl: string;
   clientId: string;
   scopes: string;
   state: OAuthState;
-}): string => {
+  codeChallenge?: string;
+}): Promise<string> => {
   const urlParams = new URLSearchParams({
     client_id: params.clientId,
     redirect_uri: getOAuthCallbackUrl(),
@@ -106,6 +141,12 @@ const buildAuthorizationUrl = (params: {
     state: btoa(JSON.stringify(params.state)),
     scope: params.scopes,
   });
+
+  // Add PKCE params if code challenge provided
+  if (params.codeChallenge) {
+    urlParams.append("code_challenge", params.codeChallenge);
+    urlParams.append("code_challenge_method", "S256");
+  }
 
   if (params.authUrl.includes("google.com")) {
     urlParams.append("access_type", "offline");
@@ -189,63 +230,70 @@ const executeClientCredentialsFlow = async (params: {
 };
 
 const executeAuthorizationCodeFlow = (params: {
-  integrationId: string;
+  systemId: string;
   oauthFields: OAuthFields;
   state: OAuthState;
   callbacks: OAuthCallbacks;
   apiKey: string;
+  usePKCE?: boolean;
 }): (() => void) | null => {
-  const { integrationId, oauthFields, state, callbacks, apiKey } = params;
+  const { systemId, oauthFields, state, callbacks, apiKey, usePKCE } = params;
   const { onSuccess, onError } = callbacks;
 
   if (!oauthFields.auth_url) {
     onError?.(
-      "[OAUTH_STAGE:INITIALIZATION] Missing OAuth authorization URL (auth_url). Please configure the auth_url field in your integration credentials.",
+      "[OAUTH_STAGE:INITIALIZATION] Missing OAuth authorization URL (auth_url). Please configure the auth_url field in your system credentials.",
     );
     return null;
   }
 
-  const authUrl = buildAuthorizationUrl({
-    authUrl: oauthFields.auth_url,
-    clientId: oauthFields.client_id,
-    scopes: oauthFields.scopes || "",
-    state,
-  });
+  // Generate PKCE values upfront if needed
+  let codeVerifier: string | undefined;
+  let codeChallenge: string | undefined;
 
-  // Set cookie then open popup to avoid race condition
-  fetch("/api/auth/init-oauth", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ apiKey }),
-    credentials: "same-origin",
-  })
-    .then(() => {
-      const popup = openOAuthPopup(authUrl);
-      if (!popup) {
-        onError?.(
-          "[OAUTH_STAGE:POPUP] Failed to open OAuth popup window. Please check if popups are blocked by your browser.",
-        );
-        return;
-      }
-      setupPopupMonitoring(popup, integrationId, callbacks);
-    })
-    .catch((err) => {
-      console.error("Failed to set OAuth cookie:", err);
-      onError?.(
-        "[OAUTH_STAGE:INITIALIZATION] Failed to initialize OAuth session. Please try again.",
-      );
+  const initAndOpenPopup = async () => {
+    if (usePKCE) {
+      codeVerifier = generateCodeVerifier();
+      codeChallenge = await generateCodeChallenge(codeVerifier);
+    }
+
+    // Set cookie with apiKey and optional codeVerifier
+    await fetch("/api/auth/init-oauth", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apiKey, codeVerifier }),
+      credentials: "same-origin",
     });
+
+    const authUrl = await buildAuthorizationUrl({
+      authUrl: oauthFields.auth_url!,
+      clientId: oauthFields.client_id,
+      scopes: oauthFields.scopes || "",
+      state,
+      codeChallenge,
+    });
+
+    const popup = openOAuthPopup(authUrl);
+    if (!popup) {
+      onError?.(
+        "[OAUTH_STAGE:POPUP] Failed to open OAuth popup window. Please check if popups are blocked by your browser.",
+      );
+      return;
+    }
+    setupPopupMonitoring(popup, systemId, callbacks);
+  };
+
+  initAndOpenPopup().catch((err) => {
+    console.error("Failed to initialize OAuth:", err);
+    onError?.("[OAUTH_STAGE:INITIALIZATION] Failed to initialize OAuth session. Please try again.");
+  });
 
   // Return dummy cleanup - actual cleanup set up after popup opens
   return () => {};
 };
 
 // Helper to set up popup monitoring
-const setupPopupMonitoring = (
-  popup: Window,
-  integrationId: string,
-  callbacks: OAuthCallbacks,
-): void => {
+const setupPopupMonitoring = (popup: Window, systemId: string, callbacks: OAuthCallbacks): void => {
   const { onSuccess, onError } = callbacks;
 
   // Track if OAuth flow completed (success or error) to prevent "cancelled" error
@@ -258,7 +306,7 @@ const setupPopupMonitoring = (
       window.removeEventListener("message", handleMessage);
       if (!isCompleted) {
         onError?.(
-          "[OAUTH_STAGE:USER_CANCELLED] OAuth flow was cancelled - the popup window was closed before completing authentication.",
+          "[OAUTH_STAGE:USER_CANCELLED] User closed the authentication window - probably because of an error.",
         );
       }
     }
@@ -268,12 +316,12 @@ const setupPopupMonitoring = (
   const handleMessage = (event: MessageEvent) => {
     if (event.origin !== window.location.origin) return;
 
-    if (event.data?.type === "oauth-success" && event.data?.integrationId === integrationId) {
+    if (event.data?.type === "oauth-success" && event.data?.systemId === systemId) {
       isCompleted = true;
       clearInterval(intervalId);
       window.removeEventListener("message", handleMessage);
       onSuccess?.(event.data.tokens);
-    } else if (event.data?.type === "oauth-error" && event.data?.integrationId === integrationId) {
+    } else if (event.data?.type === "oauth-error" && event.data?.systemId === systemId) {
       isCompleted = true;
       clearInterval(intervalId);
       window.removeEventListener("message", handleMessage);
@@ -288,7 +336,7 @@ const setupPopupMonitoring = (
 };
 
 export const triggerOAuthFlow = (
-  integrationId: string,
+  systemId: string,
   oauthFields: {
     access_token?: string;
     refresh_token?: string;
@@ -300,8 +348,11 @@ export const triggerOAuthFlow = (
     client_secret?: string;
     oauth_cert?: string;
     oauth_key?: string;
+    tokenAuthMethod?: "body" | "basic_auth";
+    tokenContentType?: "form" | "json";
+    usePKCE?: boolean;
+    extraHeaders?: Record<string, string>;
   },
-  selectedIntegration?: string,
   apiKey?: string,
   authType?: string,
   onError?: (error: string) => void,
@@ -310,6 +361,7 @@ export const triggerOAuthFlow = (
   onSuccess?: (tokens: any) => void,
   endpoint?: string,
   suppressErrorUI?: boolean,
+  apiEndpoint?: string,
 ): (() => void) | null => {
   if (authType !== "oauth") return null;
 
@@ -328,7 +380,7 @@ export const triggerOAuthFlow = (
 
   if (!usingTemplate && oauthFields.client_secret && oauthFields.client_id && apiKey && endpoint) {
     clientCredentialsUid = crypto.randomUUID();
-    const client = new SuperglueClient({ endpoint, apiKey });
+    const client = new SuperglueClient({ endpoint, apiKey, apiEndpoint });
     cachePromise = client.cacheOauthClientCredentials({
       clientCredentialsUid,
       clientId: oauthFields.client_id,
@@ -337,7 +389,7 @@ export const triggerOAuthFlow = (
   }
 
   const state = buildOAuthState({
-    integrationId,
+    systemId,
     apiKey,
     tokenUrl: oauthFields.token_url!,
     templateId: templateInfo?.templateId,
@@ -347,7 +399,13 @@ export const triggerOAuthFlow = (
     oauth_cert: oauthFields.oauth_cert,
     oauth_key: oauthFields.oauth_key,
     scopes: oauthFields.scopes,
+    tokenAuthMethod: oauthFields.tokenAuthMethod,
+    tokenContentType: oauthFields.tokenContentType,
+    extraHeaders: oauthFields.extraHeaders,
   });
+
+  // Determine if PKCE should be used - from oauthFields or template
+  const usePKCE = oauthFields.usePKCE || shouldUsePKCE(templateInfo?.templateId);
 
   if (grantType === "client_credentials") {
     executeClientCredentialsFlow({ state, cachePromise, callbacks, apiKey: apiKey! });
@@ -355,16 +413,17 @@ export const triggerOAuthFlow = (
   }
 
   return executeAuthorizationCodeFlow({
-    integrationId,
+    systemId,
     oauthFields: oauthFields as OAuthFields,
     state,
     callbacks,
     apiKey,
+    usePKCE,
   });
 };
 
 export const createOAuthErrorHandler = (
-  integrationId: string,
+  systemId: string,
   toast: (props: {
     title: string;
     description: string;
@@ -372,7 +431,7 @@ export const createOAuthErrorHandler = (
   }) => any,
 ) => {
   return (error: string) => {
-    const errorInfo = parseOAuthError(error, integrationId);
+    const errorInfo = parseOAuthError(error, systemId);
     const fullDescription = errorInfo.action
       ? `${errorInfo.description}\n\nWhat to do next: ${errorInfo.action}`
       : errorInfo.description;
@@ -387,7 +446,7 @@ export const createOAuthErrorHandler = (
 
 export const parseOAuthError = (
   error: string,
-  integrationId: string,
+  systemId: string,
 ): { title: string; description: string; action?: string } => {
   const errorLower = error.toLowerCase();
 
@@ -461,7 +520,7 @@ export const parseOAuthError = (
       title: `Invalid OAuth Scope${stageDisplay}`,
       description: error,
       action:
-        "Please check the OAuth scopes configured for this integration. The requested scope may not be supported by the provider.",
+        "Please check the OAuth scopes configured for this system. The requested scope may not be supported by the provider.",
     };
   }
 

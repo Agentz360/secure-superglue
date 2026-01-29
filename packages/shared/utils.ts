@@ -1,4 +1,4 @@
-import { Integration } from "./types.js";
+import { System } from "./types.js";
 import { toJsonSchema } from "./json-schema.js";
 import { UserRole } from "./types.js";
 
@@ -168,10 +168,8 @@ function enhanceSchemaWithData(value: any, schema: any): any {
   return schema;
 }
 
-export function flattenAndNamespaceCredentials(
-  integrations: Integration[],
-): Record<string, string> {
-  return integrations.reduce(
+export function flattenAndNamespaceCredentials(systems: System[]): Record<string, string> {
+  return systems.reduce(
     (acc, sys) => {
       Object.entries(sys.credentials || {}).forEach(([key, value]) => {
         acc[`${sys.id}_${key}`] = value;
@@ -211,45 +209,45 @@ export async function generateUniqueId({
   }
 }
 
-interface IntegrationGetter {
-  getIntegration(id: string): Promise<Integration | null>;
-  getManyIntegrations?(ids: string[]): Promise<Integration[]>;
+interface SystemGetter {
+  getSystem(id: string): Promise<System | null>;
+  getManySystems?(ids: string[]): Promise<System[]>;
 }
 
-// Generic integration polling utility that works with any integration getter
-// Assumes all integrationIds are valid and exist
-export async function waitForIntegrationProcessing(
-  integrationGetter: IntegrationGetter,
-  integrationIds: string[],
+// Generic system polling utility that works with any system getter
+// Assumes all systemIds are valid and exist
+export async function waitForSystemProcessing(
+  systemGetter: SystemGetter,
+  systemIds: string[],
   timeoutMs: number = 90000,
-): Promise<Integration[]> {
+): Promise<System[]> {
   const start = Date.now();
 
   while (Date.now() - start < timeoutMs) {
-    let integrations: Integration[];
-    if (integrationGetter.getManyIntegrations) {
-      integrations = await integrationGetter.getManyIntegrations(integrationIds);
+    let systems: System[];
+    if (systemGetter.getManySystems) {
+      systems = await systemGetter.getManySystems(systemIds);
     } else {
       const settled = await Promise.allSettled(
-        integrationIds.map(async (id) => {
+        systemIds.map(async (id) => {
           try {
-            return await integrationGetter.getIntegration(id);
+            return await systemGetter.getSystem(id);
           } catch {
             return null;
           }
         }),
       );
-      integrations = settled
+      systems = settled
         .map((r) => (r.status === "fulfilled" ? r.value : null))
-        .filter(Boolean) as Integration[];
+        .filter(Boolean) as System[];
     }
-    const hasPendingDocs = integrations.some((i) => i.documentationPending === true);
-    if (!hasPendingDocs) return integrations;
+    const hasPendingDocs = systems.some((i) => i.documentationPending === true);
+    if (!hasPendingDocs) return systems;
     await new Promise((resolve) => setTimeout(resolve, 4000));
   }
 
   throw new Error(
-    `Waiting for documentation processing to complete timed out after ${timeoutMs / 1000} seconds for: ${integrationIds.join(", ")}. Please try again in a few minutes.`,
+    `Waiting for documentation processing to complete timed out after ${timeoutMs / 1000} seconds for: ${systemIds.join(", ")}. Please try again in a few minutes.`,
   );
 }
 
@@ -417,4 +415,104 @@ export function safeStringify(value: any): string {
     // As a last resort, coerce to string
     return String(value ?? "");
   }
+}
+
+export function getDateMessage(): { role: "system"; content: string } {
+  return {
+    role: "system" as const,
+    content: "The current date and time is " + new Date().toISOString(),
+  };
+}
+
+// Icon utilities for handling both SimpleIcons and Lucide icons
+// Format: "source:name" (e.g., "simpleicons:salesforce" or "lucide:database")
+// For backwards compatibility, strings without prefix are assumed to be SimpleIcons
+
+export type IconSource = "simpleicons" | "lucide";
+
+export interface ParsedIcon {
+  source: IconSource;
+  name: string;
+}
+
+/**
+ * Parse an icon string into its source and name components.
+ * Supports formats:
+ * - "simpleicons:salesforce" -> { source: "simpleicons", name: "salesforce" }
+ * - "lucide:database" -> { source: "lucide", name: "database" }
+ * - "salesforce" -> { source: "simpleicons", name: "salesforce" } (backwards compat)
+ */
+export function parseIconString(icon: string | null | undefined): ParsedIcon | null {
+  if (!icon) return null;
+
+  const colonIndex = icon.indexOf(":");
+  if (colonIndex === -1) {
+    // No prefix - assume SimpleIcons for backwards compatibility
+    return { source: "simpleicons", name: icon };
+  }
+
+  const source = icon.substring(0, colonIndex) as IconSource;
+  const name = icon.substring(colonIndex + 1);
+
+  if (source !== "simpleicons" && source !== "lucide") {
+    // Unknown source - fallback to treating the whole string as SimpleIcon name
+    return { source: "simpleicons", name: icon };
+  }
+
+  return { source, name };
+}
+
+/**
+ * Serialize an icon object into a storable string format.
+ * @param icon - Object with name and source, or a simple string name
+ * @returns Serialized icon string in "source:name" format
+ */
+export function serializeIcon(
+  icon: { name: string; source: IconSource } | string | null | undefined,
+): string | null {
+  if (!icon) return null;
+
+  if (typeof icon === "string") {
+    // Already a string - check if it has a prefix
+    const colonIndex = icon.indexOf(":");
+    if (colonIndex !== -1) {
+      return icon; // Already in correct format
+    }
+    // No prefix - add simpleicons prefix for consistency
+    return `simpleicons:${icon}`;
+  }
+
+  // Object format from discovery
+  return `${icon.source}:${icon.name}`;
+}
+
+export function normalizeToolDiff<T extends { op: string; path: string; value?: any }>(diff: T): T {
+  if (diff.op === "remove" || diff.value === undefined || typeof diff.value !== "string") {
+    return diff;
+  }
+
+  const shouldAlwaysBeObject =
+    diff.path === "/inputSchema" ||
+    diff.path === "/responseSchema" ||
+    diff.path.startsWith("/inputSchema/properties/") ||
+    diff.path.startsWith("/responseSchema/properties/") ||
+    diff.path.match(/^\/steps\/\d+\/apiConfig\/pagination$/) ||
+    diff.path.match(/^\/steps\/\d+\/apiConfig\/headers$/) ||
+    diff.path.match(/^\/steps\/\d+\/apiConfig\/queryParams$/);
+
+  if (shouldAlwaysBeObject) {
+    try {
+      return { ...diff, value: JSON.parse(diff.value) };
+    } catch {
+      return diff;
+    }
+  }
+
+  return diff;
+}
+
+export function normalizeToolDiffs<T extends { op: string; path: string; value?: any }>(
+  diffs: T[],
+): T[] {
+  return diffs.map((diff) => normalizeToolDiff(diff));
 }

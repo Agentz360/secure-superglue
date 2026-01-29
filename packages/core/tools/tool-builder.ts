@@ -1,14 +1,13 @@
 import {
   convertRequiredToArray,
   HttpMethod,
-  Integration,
+  System,
   ServiceMetadata,
   toJsonSchema,
   Tool,
 } from "@superglue/shared";
 import { JSONSchema } from "openai/lib/jsonschema.mjs";
 import z from "zod";
-import { zodToJsonSchema } from "zod-to-json-schema";
 import { getToolBuilderContext } from "../context/context-builders.js";
 import { BUILD_TOOL_SYSTEM_PROMPT } from "../context/context-prompts.js";
 import { LanguageModel, LLMMessage, LLMToolWithContext } from "../llm/llm-base-model.js";
@@ -16,7 +15,7 @@ import { getWebSearchTool, searchDocumentationToolDefinition } from "../llm/llm-
 import { logMessage } from "../utils/logs.js";
 
 export class ToolBuilder {
-  private integrations: Record<string, Integration>;
+  private systems: Record<string, System>;
   private instruction: string;
   private initialPayload: Record<string, unknown>;
   private metadata: ServiceMetadata;
@@ -26,25 +25,25 @@ export class ToolBuilder {
 
   constructor(
     instruction: string,
-    integrations: Integration[],
+    systems: System[],
     initialPayload: Record<string, unknown>,
     responseSchema: JSONSchema,
     metadata: ServiceMetadata,
   ) {
-    this.integrations = integrations.reduce(
+    this.systems = systems.reduce(
       (acc, int) => {
         acc[int.id] = int;
         return acc;
       },
-      {} as Record<string, Integration>,
+      {} as Record<string, System>,
     );
     this.instruction = instruction;
     this.initialPayload = initialPayload || {};
     this.metadata = metadata;
     this.responseSchema = responseSchema;
-    this.toolSchema = zodToJsonSchema(toolSchema);
+    this.toolSchema = z.toJSONSchema(toolSchema);
     try {
-      const credentials = Object.values(integrations).reduce((acc, int) => {
+      const credentials = Object.values(this.systems).reduce((acc, int) => {
         return {
           ...acc,
           ...Object.entries(int.credentials || {}).reduce(
@@ -70,7 +69,7 @@ export class ToolBuilder {
   private prepareBuildingContext(): LLMMessage[] {
     const buildingPromptForAgent = getToolBuilderContext(
       {
-        integrations: Object.values(this.integrations),
+        systems: Object.values(this.systems),
         payload: this.initialPayload,
         userInstruction: this.instruction,
         responseSchema: this.responseSchema,
@@ -79,7 +78,7 @@ export class ToolBuilder {
       {
         characterBudget: 120000,
         include: {
-          integrationContext: true,
+          systemContext: true,
           availableVariablesContext: true,
           payloadContext: true,
           userInstruction: true,
@@ -95,7 +94,7 @@ export class ToolBuilder {
 
   private validateTool(tool: Tool): { valid: boolean; errors: string[] } {
     const errors: string[] = [];
-    const availableIntegrationIds = Object.keys(this.integrations);
+    const availableSystemIds = Object.keys(this.systems);
     const hasSteps = tool.steps && tool.steps.length > 0;
     const hasFinalTransform =
       tool.finalTransform &&
@@ -106,19 +105,19 @@ export class ToolBuilder {
       errors.push("Tool must have either steps or a finalTransform to process data");
     }
 
-    if (hasSteps && availableIntegrationIds.length === 0) {
+    if (hasSteps && availableSystemIds.length === 0) {
       errors.push(
-        "Tool has steps but no integrations are available. Either provide integrations or use a transform-only tool.",
+        "Tool has steps but no systems are available. Either provide systems or use a transform-only tool.",
       );
     }
 
     if (hasSteps) {
       tool.steps?.forEach((step, index) => {
-        if (!step.integrationId) {
-          errors.push(`Step ${index + 1} (${step.id}): Missing integrationId`);
-        } else if (!availableIntegrationIds.includes(step.integrationId)) {
+        if (!step.systemId) {
+          errors.push(`Step ${index + 1} (${step.id}): Missing systemId`);
+        } else if (!availableSystemIds.includes(step.systemId)) {
           errors.push(
-            `Step ${index + 1} (${step.id}): Invalid integrationId '${step.integrationId}'. Available integrations: ${availableIntegrationIds.join(", ")}`,
+            `Step ${index + 1} (${step.id}): Invalid systemId '${step.systemId}'. Available systems: ${availableSystemIds.join(", ")}`,
           );
         }
         if (!step.apiConfig?.urlHost) {
@@ -145,14 +144,14 @@ export class ToolBuilder {
     let lastError: string | null = null;
 
     const webSearchTool = getWebSearchTool();
-    const firstIntegration = Object.values(this.integrations)[0];
+    const firstSystem = Object.values(this.systems)[0];
     const tools: LLMToolWithContext[] = [
       {
         toolDefinition: searchDocumentationToolDefinition,
         toolContext: {
           orgId: this.metadata.orgId,
           traceId: this.metadata.traceId,
-          integration: firstIntegration,
+          system: firstSystem,
         },
         maxUses: 3,
       },
@@ -220,7 +219,7 @@ export class ToolBuilder {
               id: generatedTool.id,
               steps: generatedTool.steps?.map((s) => ({
                 id: s.id,
-                integrationId: s.integrationId,
+                systemId: s.systemId,
                 urlHost: s.apiConfig?.urlHost,
                 urlPath: s.apiConfig?.urlPath,
               })),
@@ -237,10 +236,12 @@ export class ToolBuilder {
         generatedTool.instruction = this.instruction;
         generatedTool.responseSchema = this.responseSchema;
 
+        logMessage("info", "Tool built successfully", this.metadata);
+
         return {
           id: generatedTool.id,
           steps: generatedTool.steps,
-          integrationIds: Object.keys(this.integrations),
+          systemIds: Object.keys(this.systems),
           instruction: this.instruction,
           finalTransform: generatedTool.finalTransform,
           responseSchema: this.responseSchema,
@@ -272,10 +273,10 @@ const toolSchema = z.object({
         id: z
           .string()
           .describe("Unique camelCase identifier for the step (e.g., 'fetchCustomerDetails')"),
-        integrationId: z
+        systemId: z
           .string()
           .describe(
-            "REQUIRED: The integration ID for this step (must match one of the available integration IDs)",
+            "REQUIRED: The system ID for this step (must match one of the available system IDs)",
           ),
         loopSelector: z
           .string()
@@ -360,9 +361,7 @@ const toolSchema = z.object({
           .describe("Complete API configuration for this step"),
       }),
     )
-    .describe(
-      "Array of workflow steps. Can be empty ([]) for transform-only workflows that just process the input payload without API calls",
-    ),
+    .describe("Array of workflow steps."),
   finalTransform: z
     .string()
     .describe(

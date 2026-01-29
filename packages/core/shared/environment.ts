@@ -1,10 +1,6 @@
 import { logMessage } from "../utils/logs.js";
 
 export function validateEnvironment() {
-  if (!process.env.START_SCHEDULER_SERVER) {
-    logMessage("warn", "START_SCHEDULER_SERVER is not set defaulting to false.");
-  }
-
   if (!process.env.API_PORT) {
     logMessage("warn", "API_PORT is not set defaulting to 3002.");
   }
@@ -23,6 +19,10 @@ export function validateEnvironment() {
 
   if (process.env.LLM_PROVIDER?.toUpperCase() === "ANTHROPIC" && !process.env.ANTHROPIC_API_KEY) {
     throw new Error("ANTHROPIC_API_KEY is not set.");
+  }
+
+  if (!process.env.TAVILY_API_KEY) {
+    logMessage("warn", "TAVILY_API_KEY is not set. Web search functionality will be unavailable.");
   }
 
   if (

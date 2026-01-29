@@ -1,4 +1,4 @@
-import { SuperglueClient } from "@superglue/shared";
+import { SuperglueClient, systems } from "@superglue/shared";
 import { OAuthState } from "@/src/lib/oauth-utils";
 import { resolveOAuthCertAndKey } from "@superglue/shared";
 import axios from "axios";
@@ -15,38 +15,100 @@ interface OAuthTokenResponse {
   expires_in?: number;
 }
 
+interface TokenExchangeConfig {
+  tokenAuthMethod?: "body" | "basic_auth";
+  tokenContentType?: "form" | "json";
+  extraHeaders?: Record<string, string>;
+}
+
+function getTokenExchangeConfig(
+  templateId?: string,
+  stateConfig?: TokenExchangeConfig,
+): TokenExchangeConfig {
+  // State config (from agent) takes priority over template config
+  const templateConfig: TokenExchangeConfig = {};
+  if (templateId) {
+    const template = systems[templateId];
+    if (template?.oauth) {
+      templateConfig.tokenAuthMethod = template.oauth.tokenAuthMethod;
+      templateConfig.tokenContentType = template.oauth.tokenContentType;
+      templateConfig.extraHeaders = template.oauth.extraHeaders;
+    }
+  }
+
+  return {
+    tokenAuthMethod: stateConfig?.tokenAuthMethod ?? templateConfig.tokenAuthMethod,
+    tokenContentType: stateConfig?.tokenContentType ?? templateConfig.tokenContentType,
+    extraHeaders: stateConfig?.extraHeaders ?? templateConfig.extraHeaders,
+  };
+}
+
 async function exchangeCodeForToken(
   code: string,
   tokenUrl: string,
   clientId: string,
   clientSecret: string,
   redirectUri: string,
-  state?: string,
+  config: TokenExchangeConfig = {},
+  codeVerifier?: string,
 ): Promise<OAuthTokenResponse> {
-  if (!clientId || !clientSecret) {
+  if (!clientId || (!clientSecret && !codeVerifier)) {
     throw new Error(
       "[OAUTH_STAGE:TOKEN_EXCHANGE] OAuth client credentials not configured for authorization code flow",
     );
   }
 
+  const useBasicAuth = config.tokenAuthMethod === "basic_auth";
+  const useJson = config.tokenContentType === "json";
+
+  const headers: Record<string, string> = {
+    "Content-Type": useJson ? "application/json" : "application/x-www-form-urlencoded",
+    Accept: "application/json",
+    ...config.extraHeaders,
+  };
+
+  if (useBasicAuth && clientSecret) {
+    const basicAuth = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
+    headers["Authorization"] = `Basic ${basicAuth}`;
+  }
+
   try {
-    const response = await axios.post(
-      tokenUrl,
-      new URLSearchParams({
+    let body: string | URLSearchParams;
+    if (useJson) {
+      const jsonBody: Record<string, string> = {
         grant_type: "authorization_code",
         code,
-        client_id: clientId,
-        client_secret: clientSecret,
         redirect_uri: redirectUri,
-        ...(state ? { state } : {}),
-      }),
-      {
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          Accept: "application/json",
-        },
-      },
-    );
+      };
+      // Only include credentials in body if not using basic auth
+      if (!useBasicAuth) {
+        jsonBody.client_id = clientId;
+        if (clientSecret) jsonBody.client_secret = clientSecret;
+      }
+      // Add PKCE code_verifier if present
+      if (codeVerifier) {
+        jsonBody.code_verifier = codeVerifier;
+      }
+      body = JSON.stringify(jsonBody);
+    } else {
+      const formParams: Record<string, string> = {
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: redirectUri,
+      };
+      // Only include credentials in body if not using basic auth
+      if (!useBasicAuth) {
+        formParams.client_id = clientId;
+        if (clientSecret) formParams.client_secret = clientSecret;
+      }
+      // Add PKCE code_verifier if present
+      if (codeVerifier) {
+        formParams.code_verifier = codeVerifier;
+      }
+      body = new URLSearchParams(formParams);
+    }
+
+    const response = await axios.post(tokenUrl, body, { headers });
 
     return response.data;
   } catch (error) {
@@ -145,7 +207,7 @@ function buildRedirectUrl(origin: string, path: string, params: Record<string, s
 function createOAuthCallbackHTML(
   type: "success" | "error",
   message: string,
-  integrationId: string,
+  systemId: string,
   origin: string,
   tokens?: any,
   suppressErrorUI?: boolean,
@@ -182,7 +244,7 @@ function createOAuthCallbackHTML(
                     try {
                         window.opener.postMessage({ 
                             type: 'oauth-${type}', 
-                            integrationId: '${integrationId}',
+                            systemId: '${systemId}',
                             message: '${escapedMessage}',
                             tokens: ${tokens ? JSON.stringify(tokens) : "undefined"}
                         }, '${origin}');
@@ -193,7 +255,7 @@ function createOAuthCallbackHTML(
                         setTimeout(() => window.close(), 100);
                     }
                 } else {
-                    window.location.href = '${origin}/integrations?${isError ? "error" : "success"}=oauth_${type}&integration=${integrationId}&message=' + encodeURIComponent('${escapedMessage}');
+                    window.location.href = '${origin}/systems?${isError ? "error" : "success"}=oauth_${type}&system=${systemId}&message=' + encodeURIComponent('${escapedMessage}');
                 }
             </script>
         </body>
@@ -237,12 +299,12 @@ export async function GET(request: NextRequest) {
   // Handle OAuth provider errors
   if (error) {
     const errorMsg = `[OAUTH_STAGE:AUTHORIZATION] OAuth provider returned error during user authorization: ${error}${errorDescription ? ` - ${errorDescription}` : ""}. This error occurred before the token exchange step.`;
-    let integrationId = "unknown";
+    let systemId = "unknown";
     let suppressErrorUI = false;
     try {
       if (state) {
         const stateData = JSON.parse(atob(state)) as OAuthState;
-        integrationId = stateData.integrationId || "unknown";
+        systemId = stateData.systemId || "unknown";
         suppressErrorUI = stateData.suppressErrorUI || false;
       }
     } catch {}
@@ -250,7 +312,7 @@ export async function GET(request: NextRequest) {
     const html = createOAuthCallbackHTML(
       "error",
       errorMsg,
-      integrationId,
+      systemId,
       origin,
       undefined,
       suppressErrorUI,
@@ -264,7 +326,7 @@ export async function GET(request: NextRequest) {
       : "[OAUTH_STAGE:CALLBACK] No state parameter received from OAuth provider. This indicates a malformed OAuth callback.";
 
     return NextResponse.redirect(
-      buildRedirectUrl(origin, "/integrations", {
+      buildRedirectUrl(origin, "/systems", {
         error: !code ? "no_code" : "no_state",
         message: errorMsg,
       }),
@@ -274,7 +336,7 @@ export async function GET(request: NextRequest) {
   try {
     const stateData = JSON.parse(atob(state)) as OAuthState & { token_url?: string };
     const {
-      integrationId,
+      systemId,
       timestamp,
       clientId,
       client_credentials_uid,
@@ -294,8 +356,28 @@ export async function GET(request: NextRequest) {
 
     const endpoint = process.env.GRAPHQL_ENDPOINT;
 
-    // Get API key from cookie (set during OAuth init)
-    const apiKey = request.cookies.get("api_key")?.value;
+    // Get OAuth session from cookie (set during OAuth init)
+    const oauthSessionCookie = request.cookies.get("oauth_session")?.value;
+    // Fallback to legacy api_key cookie for backwards compatibility
+    const legacyApiKey = request.cookies.get("api_key")?.value;
+
+    let apiKey: string | undefined;
+    let codeVerifier: string | undefined;
+
+    if (oauthSessionCookie) {
+      try {
+        const sessionData = JSON.parse(oauthSessionCookie);
+        apiKey = sessionData.apiKey;
+        codeVerifier = sessionData.codeVerifier;
+      } catch {
+        // Invalid JSON, ignore
+      }
+    }
+
+    // Fallback to legacy cookie
+    if (!apiKey && legacyApiKey) {
+      apiKey = legacyApiKey;
+    }
 
     if (!apiKey) {
       throw new Error(
@@ -311,7 +393,11 @@ export async function GET(request: NextRequest) {
         client_secret: "",
       };
     } else {
-      const client = new SuperglueClient({ endpoint, apiKey: apiKey });
+      const client = new SuperglueClient({
+        endpoint,
+        apiKey: apiKey,
+        apiEndpoint: process.env.API_ENDPOINT,
+      });
       resolved = await client.getOAuthClientCredentials({
         templateId,
         clientCredentialsUid: client_credentials_uid,
@@ -342,7 +428,17 @@ export async function GET(request: NextRequest) {
         keyContent,
         scopes,
       );
-    } else {
+    }
+
+    // Get token exchange config - state config (from agent) takes priority over template
+    const stateTokenConfig: TokenExchangeConfig = {
+      tokenAuthMethod: stateData.tokenAuthMethod,
+      tokenContentType: stateData.tokenContentType,
+      extraHeaders: stateData.extraHeaders,
+    };
+    const tokenConfig = getTokenExchangeConfig(templateId, stateTokenConfig);
+
+    if (grantTypeParam !== "client_credentials") {
       const redirectUri = stateData.redirectUri || `${origin}/api/auth/callback`;
       tokenData = await exchangeCodeForToken(
         code as string,
@@ -350,7 +446,8 @@ export async function GET(request: NextRequest) {
         resolved.client_id,
         resolved.client_secret,
         redirectUri,
-        state,
+        tokenConfig,
+        codeVerifier,
       );
     }
 
@@ -368,7 +465,7 @@ export async function GET(request: NextRequest) {
         JSON.stringify(tokenData, null, 2),
       );
       console.error("[OAUTH_DEBUG] Token URL:", token_url);
-      console.error("[OAUTH_DEBUG] Integration ID:", integrationId);
+      console.error("[OAUTH_DEBUG] System ID:", systemId);
       throw new Error(
         `[OAUTH_STAGE:TOKEN_VALIDATION] No access_token field in OAuth provider response. The provider may require different OAuth configuration or the token_url may be incorrect: ${JSON.stringify(tokenData, null, 2)}`,
       );
@@ -384,44 +481,47 @@ export async function GET(request: NextRequest) {
         (additionalFields.expires_in
           ? new Date(Date.now() + additionalFields.expires_in * 1000).toISOString()
           : undefined),
+      ...(tokenConfig.tokenAuthMethod && { tokenAuthMethod: tokenConfig.tokenAuthMethod }),
+      ...(tokenConfig.tokenContentType && { tokenContentType: tokenConfig.tokenContentType }),
+      ...(tokenConfig.extraHeaders && { extraHeaders: JSON.stringify(tokenConfig.extraHeaders) }),
     };
 
     if (grantTypeParam === "client_credentials") {
       const response = NextResponse.json({
         type: "oauth-success",
-        integrationId,
+        systemId,
         message: "OAuth connection completed successfully!",
         tokens,
       });
-      // Clear cookie
-      response.cookies.delete("api_key");
+      response.cookies.delete({ name: "oauth_session", path: "/api/auth/callback" });
+      response.cookies.delete("api_key"); // Legacy cleanup
       return response;
     } else {
       const html = createOAuthCallbackHTML(
         "success",
         "OAuth connection completed successfully!",
-        integrationId,
+        systemId,
         origin,
         tokens,
         suppressErrorUI,
       );
       const response = new NextResponse(html, { headers: { "Content-Type": "text/html" } });
-      // Clear cookie
-      response.cookies.delete("api_key");
+      response.cookies.delete({ name: "oauth_session", path: "/api/auth/callback" });
+      response.cookies.delete("api_key"); // Legacy cleanup
       return response;
     }
   } catch (error) {
     console.error("OAuth callback error:", error);
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
 
-    // Try to extract integration ID from state if available
-    let integrationId = "unknown";
+    // Try to extract system ID from state if available
+    let systemId = "unknown";
     let isClientCredentials = false;
     let suppressErrorUI = false;
     try {
       if (state) {
         const stateData = JSON.parse(atob(state)) as OAuthState;
-        integrationId = stateData.integrationId || "unknown";
+        systemId = stateData.systemId || "unknown";
         suppressErrorUI = stateData.suppressErrorUI || false;
       }
       isClientCredentials = grantTypeParam === "client_credentials";
@@ -433,26 +533,28 @@ export async function GET(request: NextRequest) {
       const response = NextResponse.json(
         {
           type: "oauth-error",
-          integrationId,
+          systemId,
           message: errorMessage,
         },
         { status: 400 },
       );
-      // Clear cookie on error too
-      response.cookies.delete("api_key");
+      // Clear cookie on error too - must specify same path it was set with
+      response.cookies.delete({ name: "oauth_session", path: "/api/auth/callback" });
+      response.cookies.delete("api_key"); // Legacy cleanup
       return response;
     } else {
       const html = createOAuthCallbackHTML(
         "error",
         errorMessage,
-        integrationId,
+        systemId,
         origin,
         undefined,
         suppressErrorUI,
       );
       const response = new NextResponse(html, { headers: { "Content-Type": "text/html" } });
-      // Clear cookie on error too
-      response.cookies.delete("api_key");
+      // Clear cookie on error too - must specify same path it was set with
+      response.cookies.delete({ name: "oauth_session", path: "/api/auth/callback" });
+      response.cookies.delete("api_key"); // Legacy cleanup
       return response;
     }
   }

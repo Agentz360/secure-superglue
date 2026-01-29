@@ -1,6 +1,6 @@
-import { Integration } from "./types";
+import { System } from "./types";
 
-export interface IntegrationConfig {
+export interface SystemConfig {
   name: string;
   apiUrl: string;
   regex: string;
@@ -15,11 +15,15 @@ export interface IntegrationConfig {
     scopes?: string;
     client_id?: string; // Public client ID (non-sensitive, can be in template)
     grant_type?: "authorization_code" | "client_credentials";
+    tokenAuthMethod?: "body" | "basic_auth";
+    tokenContentType?: "form" | "json";
+    extraHeaders?: Record<string, string>;
+    usePKCE?: boolean;
   };
   keywords?: string[];
 }
 
-export const integrations: Record<string, IntegrationConfig> = {
+export const systems: Record<string, SystemConfig> = {
   // Important: keys and names are the same and do not change without updating the integration and integration_details table with the template entries
   postgres: {
     name: "postgres",
@@ -333,12 +337,16 @@ export const integrations: Record<string, IntegrationConfig> = {
     regex: "^.*airtable.*$",
     icon: "airtable",
     docsUrl: "https://airtable.com/developers/web/api",
-    preferredAuthType: "apikey",
+    preferredAuthType: "oauth",
     oauth: {
       authUrl: "https://airtable.com/oauth2/v1/authorize",
       tokenUrl: "https://airtable.com/oauth2/v1/token",
       scopes:
-        "data.records:read data.records:write data.recordComments:read data.recordComments:write schema.bases:read schema.bases:write webhook:manage user.email:read",
+        "data.recordComments:read data.recordComments:write data.records:read data.records:write schema.bases:read schema.bases:write user.email:read enterprise.groups:read workspacesAndBases.shares:manage workspacesAndBases:read workspacesAndBases:write data.records:manage enterprise.account:read enterprise.account:write enterprise.auditLogs:read enterprise.changeEvents:read enterprise.exports:manage enterprise.groups:manage enterprise.scim.usersAndGroups:manage enterprise.user:read enterprise.user:write workspacesAndBases:manage webhook:manage",
+      client_id: "02601365-de97-4191-b12d-e03c8540b03d",
+      usePKCE: true,
+      tokenAuthMethod: "basic_auth",
+      tokenContentType: "form",
     },
     keywords: [
       "bases",
@@ -636,7 +644,7 @@ export const integrations: Record<string, IntegrationConfig> = {
       scopes: "full",
       grant_type: "authorization_code",
       client_id:
-        "3MVG9rZjd7MXFdLh_gnrsdT0JY5BfNPxarDdhPQvng2.N9lbP0RCh9Rov2Mx.QYjNVNjlCuJMlYOouwbYOMAx",
+        "3MVG9rZjd7MXFdLh_gnrsdT0JYyCLRCfTpDu93a61QQbINe1OKu1ROuXUBzNLAX2WT.XbO3L444Hyuu2Xd8wO",
     },
     keywords: [
       "accounts",
@@ -1133,7 +1141,8 @@ export const integrations: Record<string, IntegrationConfig> = {
       authUrl: "https://auth.atlassian.com/authorize",
       tokenUrl: "https://auth.atlassian.com/oauth/token",
       scopes:
-        "read:jira-work write:jira-work read:jira-user write:jira-user read:jira-work-management write:jira-work-management read:servicedesk-request write:servicedesk-request manage:jira-project manage:jira-configuration manage:jira-data-provider",
+        "read:jira-work write:jira-work read:jira-user write:jira-user read:jira-work-management write:jira-work-management read:servicedesk-request write:servicedesk-request manage:jira-project manage:jira-configuration manage:jira-data-provider offline_access",
+      client_id: "Az7iTb4uWYSv5N4p295PulP8oO2B3PjK",
     },
     keywords: [
       "issues",
@@ -1168,7 +1177,8 @@ export const integrations: Record<string, IntegrationConfig> = {
       authUrl: "https://auth.atlassian.com/authorize",
       tokenUrl: "https://auth.atlassian.com/oauth/token",
       scopes:
-        "read:confluence-content.all write:confluence-content read:confluence-space.summary write:confluence-space read:confluence-props write:confluence-props read:confluence-user write:confluence-user read:confluence-groups write:confluence-groups delete:confluence-content delete:confluence-space",
+        "read:confluence-content.all write:confluence-content read:confluence-space.summary write:confluence-space read:confluence-props write:confluence-props read:confluence-user write:confluence-user read:confluence-groups write:confluence-groups delete:confluence-content delete:confluence-space offline_access",
+      client_id: "Az7iTb4uWYSv5N4p295PulP8oO2B3PjK",
     },
     keywords: [
       "spaces",
@@ -1393,12 +1403,16 @@ export const integrations: Record<string, IntegrationConfig> = {
     // this openapi spec was last updated in 2024 - might be outdated
     openApiUrl:
       "https://raw.githubusercontent.com/cameronking4/notion-openapi-chatgpt-action/refs/heads/main/public/notion-openapi.json",
-    preferredAuthType: "apikey",
+    preferredAuthType: "oauth",
     oauth: {
       authUrl: "https://api.notion.com/v1/oauth/authorize",
       tokenUrl: "https://api.notion.com/v1/oauth/token",
       scopes:
         "read_content update_content insert_content read_comments update_comments insert_comments read_user update_user",
+      client_id: "2f4d872b-594c-805e-abdd-00375c12bae0",
+      tokenAuthMethod: "basic_auth",
+      tokenContentType: "json",
+      extraHeaders: { "Notion-Version": "2022-06-28" },
     },
     keywords: [
       "pages",
@@ -2831,91 +2845,164 @@ export const integrations: Record<string, IntegrationConfig> = {
   },
 };
 
-export const integrationOptions = [
+export const systemOptions = [
   { value: "manual", label: "Custom API", icon: "default" },
-  ...Object.entries(integrations).map(([key, integration]) => ({
+  ...Object.entries(systems).map(([key, system]) => ({
     value: key,
     label: key
       .replace(/([A-Z])/g, " $1") // Add space before capital letters
       .replace(/^./, (str) => str.toUpperCase()) // Capitalize first letter
       .trim(), // Remove leading space
-    icon: integration.icon || "default",
+    icon: system.icon || "default",
   })),
 ];
 
 /**
- * Find matching integration for a given URL
- * @param url - The URL to match against integrations
- * @returns The matching integration key and details, or null if no match found
+ * Find matching template for a System object.
+ * Priority order: templateName > id > id with numeric suffix stripped > name > urlHost regex match
+ * @param system - System object with templateName, id, name, and/or urlHost/urlPath
+ * @returns The matching template key and config, or null if no match found
  */
-export function findMatchingIntegration(
-  url: string,
-): { key: string; integration: IntegrationConfig } | null {
-  // Ensure URL has a scheme for proper matching
-  const urlForMatching =
-    url.startsWith("http") || url.startsWith("postgres") ? url : `https://${url}`;
+export function findTemplateForSystem(system: {
+  templateName?: string;
+  id?: string;
+  name?: string;
+  urlHost?: string;
+  urlPath?: string;
+}): { key: string; template: SystemConfig } | null {
+  // 1. Direct lookup via stored templateName (highest priority)
+  if (system.templateName && systems[system.templateName]) {
+    return { key: system.templateName, template: systems[system.templateName] };
+  }
 
-  const matches: { key: string; integration: IntegrationConfig; specificity: number }[] = [];
+  // 2. Direct lookup by system ID
+  if (system.id && systems[system.id]) {
+    return { key: system.id, template: systems[system.id] };
+  }
 
-  for (const [key, integration] of Object.entries(integrations)) {
-    try {
-      if (new RegExp(integration.regex).test(urlForMatching)) {
-        // Calculate specificity: longer, more specific regexes get higher scores
-        const specificity =
-          integration.regex.length + (integration.regex.includes("(?!") ? 100 : 0);
-        matches.push({ key, integration, specificity });
-      }
-    } catch (e) {
-      console.error(`Invalid regex pattern for integration: ${key}`);
+  // 3. Try ID with numeric suffix stripped (e.g., "firebase-1" -> "firebase")
+  if (system.id) {
+    const baseId = system.id.replace(/-\d+$/, "");
+    if (baseId !== system.id && systems[baseId]) {
+      return { key: baseId, template: systems[baseId] };
     }
   }
 
-  if (matches.length === 0) return null;
+  // 4. Try by name (lowercase)
+  if (system.name && systems[system.name]) {
+    return { key: system.name, template: systems[system.name] };
+  }
 
-  // Return the most specific match (highest specificity score)
-  const bestMatch = matches.sort((a, b) => b.specificity - a.specificity)[0];
-  return { key: bestMatch.key, integration: bestMatch.integration };
+  // 5. URL regex matching (lowest priority) - compose urlHost + urlPath for matching
+  if (system.urlHost) {
+    const url = system.urlPath
+      ? `${system.urlHost.replace(/\/$/, "")}/${system.urlPath.replace(/^\//, "")}`
+      : system.urlHost;
+
+    // Ensure URL has a scheme for proper matching
+    const urlForMatching =
+      url.startsWith("http") || url.startsWith("postgres") ? url : `https://${url}`;
+
+    const matches: { key: string; template: SystemConfig; specificity: number }[] = [];
+
+    for (const [key, template] of Object.entries(systems)) {
+      try {
+        if (new RegExp(template.regex).test(urlForMatching)) {
+          // Calculate specificity: longer, more specific regexes get higher scores
+          const specificity = template.regex.length + (template.regex.includes("(?!") ? 100 : 0);
+          matches.push({ key, template, specificity });
+        }
+      } catch (e) {
+        console.error(`Invalid regex pattern for system: ${key}`);
+      }
+    }
+
+    if (matches.length > 0) {
+      // Return the most specific match (highest specificity score)
+      const bestMatch = matches.sort((a, b) => b.specificity - a.specificity)[0];
+      return { key: bestMatch.key, template: bestMatch.template };
+    }
+  }
+
+  return null;
 }
 
 /**
- * Get OAuth configuration for an integration
- * @param integrationKey - The key of the integration
+ * Get OAuth configuration for a system
+ * @param systemKey - The key of the system
  * @returns OAuth config or null if not available
  */
-export function getOAuthConfig(integrationKey: string): IntegrationConfig["oauth"] | null {
-  return integrations[integrationKey]?.oauth || null;
+export function getOAuthConfig(systemKey: string): SystemConfig["oauth"] | null {
+  return systems[systemKey]?.oauth || null;
 }
 
 /**
- * Get OAuth token URL for an integration
- * @param integration - The integration object with credentials and URL info
- * @returns The token URL for OAuth token exchange
+ * Get OAuth token exchange configuration for a system
+ * Priority: system credentials > template config > defaults
+ * @param system - The system object
+ * @returns Token exchange config
  */
-export function getOAuthTokenUrl(integration: Integration): string {
-  // First priority: User-provided token URL in credentials
-  if (integration.credentials?.token_url) {
-    return integration.credentials.token_url;
+export function getOAuthTokenExchangeConfig(system: System): {
+  tokenAuthMethod?: "body" | "basic_auth";
+  tokenContentType?: "form" | "json";
+  extraHeaders?: Record<string, string>;
+} {
+  const creds = system.credentials || {};
+
+  // Parse extraHeaders if stored as JSON string
+  let extraHeaders: Record<string, string> | undefined;
+  if (creds.extraHeaders) {
+    try {
+      extraHeaders =
+        typeof creds.extraHeaders === "string"
+          ? JSON.parse(creds.extraHeaders)
+          : creds.extraHeaders;
+    } catch {
+      extraHeaders = undefined;
+    }
   }
 
-  // Second priority: Known integration template token URL
-  const knownIntegration = Object.entries(integrations).find(
-    ([key]) => integration.id === key || integration.urlHost?.includes(key),
-  );
+  const storedConfig = {
+    tokenAuthMethod: creds.tokenAuthMethod as "body" | "basic_auth" | undefined,
+    tokenContentType: creds.tokenContentType as "form" | "json" | undefined,
+    extraHeaders,
+  };
 
-  if (knownIntegration) {
-    const [_, config] = knownIntegration;
-    if (config.oauth?.tokenUrl) {
-      return config.oauth.tokenUrl;
-    }
+  // Get template config as fallback
+  const match = findTemplateForSystem(system);
+  const templateOAuth = match?.template.oauth;
+
+  return {
+    tokenAuthMethod: storedConfig.tokenAuthMethod ?? templateOAuth?.tokenAuthMethod,
+    tokenContentType: storedConfig.tokenContentType ?? templateOAuth?.tokenContentType,
+    extraHeaders: storedConfig.extraHeaders ?? templateOAuth?.extraHeaders,
+  };
+}
+
+/**
+ * Get OAuth token URL for a system
+ * @param system - The system object with credentials and URL info
+ * @returns The token URL for OAuth token exchange
+ */
+export function getOAuthTokenUrl(system: System): string {
+  // First priority: User-provided token URL in credentials
+  if (system.credentials?.token_url) {
+    return system.credentials.token_url;
+  }
+
+  // Second priority: Template lookup (templateName > id > urlHost)
+  const match = findTemplateForSystem(system);
+  if (match?.template.oauth?.tokenUrl) {
+    return match.template.oauth.tokenUrl;
   }
 
   // Fallback: Default OAuth token endpoint
-  if (!integration.urlHost) {
+  if (!system.urlHost) {
     throw new Error(
-      `Cannot determine OAuth token URL for integration ${integration.id}: no urlHost or token_url provided`,
+      `Cannot determine OAuth token URL for system ${system.id}: no urlHost or token_url provided`,
     );
   }
-  return `${integration.urlHost}/oauth/token`;
+  return `${system.urlHost}/oauth/token`;
 }
 
 export interface SdkCodegenOptions {

@@ -1,9 +1,10 @@
 import {
   ApiConfig,
   ExecutionStep,
-  Integration,
+  System,
   maskCredentials,
   RequestOptions,
+  ResponseFilter,
   ServiceMetadata,
   Tool,
   ToolResult,
@@ -12,7 +13,6 @@ import {
 import { flattenAndNamespaceCredentials } from "@superglue/shared/utils";
 import { JSONSchema } from "openai/lib/jsonschema.mjs";
 import { z } from "zod";
-import { zodToJsonSchema } from "zod-to-json-schema";
 import {
   getEvaluateStepResponseContext,
   getGenerateStepConfigContext,
@@ -22,11 +22,12 @@ import {
   GENERATE_STEP_CONFIG_SYSTEM_PROMPT,
 } from "../context/context-prompts.js";
 import { server_defaults } from "../default.js";
-import { IntegrationManager } from "../integrations/integration-manager.js";
+import { SystemManager } from "../systems/system-manager.js";
 import { LanguageModel, LLMMessage } from "../llm/llm-base-model.js";
 import { isSelfHealingEnabled, transformData } from "../utils/helpers.js";
 import { logMessage } from "../utils/logs.js";
 import { telemetryClient } from "../utils/telemetry.js";
+import { applyResponseFilters, FilterMatchError } from "./response-filters.js";
 import { FTPStepExecutionStrategy } from "./strategies/ftp/ftp.js";
 import { AbortError, ApiCallError, HttpStepExecutionStrategy } from "./strategies/http/http.js";
 import { PostgresStepExecutionStrategy } from "./strategies/postgres/postgres.js";
@@ -37,7 +38,7 @@ import { executeAndEvaluateFinalTransform } from "./tool-transform.js";
 export interface ToolExecutorOptions {
   tool: Tool;
   metadata: ServiceMetadata;
-  integrations: IntegrationManager[];
+  systems: SystemManager[];
 }
 
 export class ToolExecutor implements Tool {
@@ -49,11 +50,12 @@ export class ToolExecutor implements Tool {
   public metadata: ServiceMetadata;
   public instruction?: string;
   public inputSchema?: JSONSchema;
-  public integrationIds: string[];
-  private integrations: Record<string, IntegrationManager>;
+  public systemIds: string[];
+  public responseFilters?: ResponseFilter[];
+  private systems: Record<string, SystemManager>;
   private strategyRegistry: StepExecutionStrategyRegistry;
 
-  constructor({ tool, metadata, integrations }: ToolExecutorOptions) {
+  constructor({ tool, metadata, systems }: ToolExecutorOptions) {
     this.id = tool.id;
     this.steps = tool.steps;
     this.finalTransform = tool.finalTransform;
@@ -61,16 +63,17 @@ export class ToolExecutor implements Tool {
     this.instruction = tool.instruction;
     this.metadata = metadata;
     this.inputSchema = tool.inputSchema;
+    this.responseFilters = tool.responseFilters;
 
-    this.integrations = integrations.reduce(
-      (acc, int) => {
-        acc[int.id] = int;
+    this.systems = systems.reduce(
+      (acc, sys) => {
+        acc[sys.id] = sys;
         return acc;
       },
-      {} as Record<string, IntegrationManager>,
+      {} as Record<string, SystemManager>,
     );
 
-    this.integrationIds = tool.integrationIds;
+    this.systemIds = tool.systemIds;
 
     this.result = {
       id: crypto.randomUUID(),
@@ -118,7 +121,7 @@ export class ToolExecutor implements Tool {
         }
       }
 
-      if (this.finalTransform || this.responseSchema) {
+      if (this.finalTransform || this.responseSchema || this.responseFilters?.length) {
         const finalAggregatedStepData = this.buildAggregatedStepData(payload);
 
         const finalTransformResult = await executeAndEvaluateFinalTransform({
@@ -134,15 +137,34 @@ export class ToolExecutor implements Tool {
           return this.completeWithFailure(finalTransformResult.error);
         }
 
-        this.result.data = finalTransformResult.transformedData || {};
+        let finalData = finalTransformResult.transformedData || {};
+
+        // Apply response filters after transform
+        if (this.responseFilters?.length) {
+          const filterResult = applyResponseFilters(finalData, this.responseFilters);
+          if (filterResult.failedFilters.length > 0) {
+            throw new FilterMatchError(filterResult.failedFilters);
+          }
+          finalData = filterResult.data;
+          if (filterResult.matches.length > 0) {
+            logMessage(
+              "info",
+              `Response filters applied: ${filterResult.matches.length} match(es)`,
+              this.metadata,
+            );
+          }
+        }
+
+        this.result.data = finalData;
         this.result.config = {
           id: this.id,
-          integrationIds: this.integrationIds,
+          systemIds: this.systemIds,
           steps: this.steps,
           finalTransform: finalTransformResult.finalTransform,
           inputSchema: this.inputSchema,
           responseSchema: this.responseSchema,
           instruction: this.instruction,
+          responseFilters: this.responseFilters,
         } as Tool;
       } else {
         // Always set config to propagate wrapped loopSelectors back to frontend
@@ -153,6 +175,7 @@ export class ToolExecutor implements Tool {
           inputSchema: this.inputSchema,
           responseSchema: this.responseSchema,
           instruction: this.instruction,
+          responseFilters: this.responseFilters,
         } as Tool;
       }
       return this.completeWithSuccess();
@@ -183,26 +206,24 @@ export class ToolExecutor implements Tool {
       let isLoopStep = false;
       let stepResults: any[] = [];
 
-      const integrationManager = step.integrationId
-        ? this.integrations[step.integrationId]
-        : undefined;
-      let currentIntegration: Integration | null = null;
+      const systemManager = step.systemId ? this.systems[step.systemId] : undefined;
+      let currentSystem: System | null = null;
       let loopPayload: any = null;
 
-      if (step.integrationId && !integrationManager) {
+      if (step.systemId && !systemManager) {
         throw new Error(
-          `Integration '${step.integrationId}' not found. Available integrations: ${Object.keys(this.integrations).join(", ")}`,
+          `System '${step.systemId}' not found. Available systems: ${Object.keys(this.systems).join(", ")}`,
         );
       }
 
-      // Get integration early so it's available for self-healing even if data selector fails
-      await integrationManager?.refreshTokenIfNeeded();
-      currentIntegration = await integrationManager?.getIntegration();
+      // Get system early so it's available for self-healing even if data selector fails
+      await systemManager?.refreshTokenIfNeeded();
+      currentSystem = await systemManager?.getSystem();
 
-      if (currentIntegration) {
+      if (currentSystem) {
         stepCredentials = {
           ...credentials,
-          ...flattenAndNamespaceCredentials([currentIntegration]),
+          ...flattenAndNamespaceCredentials([currentSystem]),
         } as Record<string, string>;
       }
 
@@ -226,7 +247,7 @@ export class ToolExecutor implements Tool {
 
           itemsToExecuteStepOn = itemsToExecuteStepOn.slice(
             0,
-            step.loopMaxIters || server_defaults.DEFAULT_LOOP_MAX_ITERS,
+            server_defaults.DEFAULT_LOOP_MAX_ITERS,
           );
 
           stepResults = [];
@@ -243,15 +264,15 @@ export class ToolExecutor implements Tool {
 
             loopPayload = { currentItem, ...stepInput };
 
-            // Refresh integration token if needed (important for long-running loops)
-            await integrationManager?.refreshTokenIfNeeded();
-            currentIntegration = await integrationManager?.getIntegration();
+            // Refresh system token if needed (important for long-running loops)
+            await systemManager?.refreshTokenIfNeeded();
+            currentSystem = await systemManager?.getSystem();
 
             // Repeated to update the credentials with the latest OAuth token
-            if (currentIntegration) {
+            if (currentSystem) {
               stepCredentials = {
                 ...credentials,
-                ...flattenAndNamespaceCredentials([currentIntegration]),
+                ...flattenAndNamespaceCredentials([currentSystem]),
               } as Record<string, string>;
             }
 
@@ -311,7 +332,7 @@ export class ToolExecutor implements Tool {
             await this.validateStepResponse(
               isLoopStep ? stepResults : stepResults[0] || null,
               currentConfig,
-              integrationManager,
+              systemManager,
             );
           }
 
@@ -341,12 +362,12 @@ export class ToolExecutor implements Tool {
 
             if (messages.length === 0) {
               messages = await this.initializeSelfHealingContext(
-                integrationManager,
+                systemManager,
                 currentConfig,
                 currentDataSelector,
                 loopPayload,
                 stepCredentials,
-                currentIntegration,
+                currentSystem,
               );
             }
 
@@ -354,7 +375,7 @@ export class ToolExecutor implements Tool {
               stepInput,
               credentials: stepCredentials,
               currentItem: loopPayload?.currentItem,
-              integrationUrlHost: currentIntegration.urlHost,
+              systemUrlHost: currentSystem.urlHost,
               paginationPageSize: currentConfig?.pagination?.pageSize,
             });
 
@@ -362,7 +383,7 @@ export class ToolExecutor implements Tool {
               retryCount,
               messages,
               sourceData,
-              integration: currentIntegration,
+              system: currentSystem,
               metadata: this.metadata,
             });
 
@@ -416,14 +437,14 @@ export class ToolExecutor implements Tool {
   }
 
   private async initializeSelfHealingContext(
-    integrationManager: IntegrationManager,
+    systemManager: SystemManager,
     config: ApiConfig,
     loopSelector: string,
     payload: any,
     credentials: Record<string, string>,
-    integration: Integration,
+    system: System,
   ): Promise<LLMMessage[]> {
-    const docs = await integrationManager.getDocumentation();
+    const docs = await systemManager.getDocumentation();
 
     const userPrompt = getGenerateStepConfigContext(
       {
@@ -432,8 +453,8 @@ export class ToolExecutor implements Tool {
         previousStepDataSelector: loopSelector,
         stepInput: payload,
         credentials,
-        integrationDocumentation: docs?.content || "",
-        integrationSpecificInstructions: integration.specificInstructions || "",
+        systemDocumentation: docs?.content || "",
+        systemSpecificInstructions: system.specificInstructions || "",
       },
       { characterBudget: 50000, mode: "self-healing" },
     );
@@ -447,12 +468,12 @@ export class ToolExecutor implements Tool {
   private async validateStepResponse(
     data: any,
     config: ApiConfig,
-    integrationManager: IntegrationManager,
+    systemManager: SystemManager,
   ): Promise<void> {
     const evaluation = await this.evaluateStepResponse({
       data,
       config,
-      docSearchResultsForStepInstruction: await integrationManager?.searchDocumentation(
+      docSearchResultsForStepInstruction: await systemManager?.searchDocumentation(
         config.instruction,
       ),
     });
@@ -586,7 +607,7 @@ export class ToolExecutor implements Tool {
 
     const evaluationResult = await LanguageModel.generateObject<z.infer<typeof evaluationSchema>>({
       messages: messages,
-      schema: zodToJsonSchema(evaluationSchema),
+      schema: z.toJSONSchema(evaluationSchema),
       temperature: 0,
       metadata: this.metadata,
     });
