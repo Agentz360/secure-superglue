@@ -1,8 +1,8 @@
-import { ApiConfig, HttpMethod, PaginationType, SelfHealingMode } from "@superglue/shared";
+import { ApiConfig, HttpMethod, PaginationType } from "@superglue/shared";
 import axios from "axios";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { server_defaults } from "../../../default.js";
-import { convertBasicAuthToBase64, isSelfHealingEnabled } from "../../../utils/helpers.js";
+import { convertBasicAuthToBase64 } from "../../../utils/helpers.js";
 import * as httpModule from "./http.js";
 import { HttpStepExecutionStrategy } from "./http.js";
 
@@ -382,27 +382,6 @@ describe("API Utilities", () => {
       ).rejects.toThrow(/API call failed/);
     });
 
-    it("should handle HTML error responses", async () => {
-      const htmlResponse = {
-        status: 200,
-        data: Buffer.from("<!DOCTYPE html><html><body>Error page</body></html>"),
-        statusText: "OK",
-        headers: {},
-        config: {} as any,
-      };
-      (axios as any).mockResolvedValueOnce(htmlResponse);
-
-      await expect(
-        runStepConfig({
-          config: testEndpoint,
-          payload: {},
-          credentials: {},
-          options: {},
-          metadata: {},
-        }),
-      ).rejects.toThrow(/Received HTML response/);
-    });
-
     it("should handle GraphQL error responses", async () => {
       const config = {
         ...testEndpoint,
@@ -565,87 +544,315 @@ describe("API Utilities", () => {
       expect(result.statusCode).toBe(200);
       expect(result.data).toEqual(mockData);
     });
+
+    it("should parse HTML responses with 200 status as valid data", async () => {
+      const htmlResponse = {
+        status: 200,
+        data: Buffer.from("<!DOCTYPE html><html><body><h1>Success</h1></body></html>"),
+        statusText: "OK",
+        headers: {},
+        config: {} as any,
+      };
+      (axios as any).mockResolvedValueOnce(htmlResponse);
+
+      const result = await runStepConfig({
+        config: testEndpoint,
+        payload: {},
+        credentials: {},
+        options: {},
+        metadata: {},
+      });
+
+      expect(result.statusCode).toBe(200);
+      expect(result.data).toHaveProperty("html");
+      expect(result.data.html.body.h1.content).toBe("Success");
+    });
+
+    it("should parse XML responses with 200 status as valid data", async () => {
+      const xmlResponse = {
+        status: 200,
+        data: Buffer.from('<?xml version="1.0"?><response><status>success</status></response>'),
+        statusText: "OK",
+        headers: {},
+        config: {} as any,
+      };
+      (axios as any).mockResolvedValueOnce(xmlResponse);
+
+      const result = await runStepConfig({
+        config: testEndpoint,
+        payload: {},
+        credentials: {},
+        options: {},
+        metadata: {},
+      });
+
+      expect(result.statusCode).toBe(200);
+      // XML parser uppercases keys
+      expect(result.data).toHaveProperty("RESPONSE");
+      expect(result.data.RESPONSE.STATUS).toBe("success");
+    });
+
+    it("should reject HTML responses with non-200 status", async () => {
+      const htmlErrorResponse = {
+        status: 404,
+        data: Buffer.from("<!DOCTYPE html><html><body><h1>Not Found</h1></body></html>"),
+        statusText: "Not Found",
+        headers: {},
+        config: {} as any,
+      };
+      (axios as any).mockResolvedValue(htmlErrorResponse);
+
+      await expect(
+        runStepConfig({
+          config: testEndpoint,
+          payload: {},
+          credentials: {},
+          options: { retries: 0 },
+          metadata: {},
+        }),
+      ).rejects.toThrow(/API call failed with status 404/);
+    });
+
+    it("should reject XML responses with error status code", async () => {
+      const xmlErrorResponse = {
+        status: 500,
+        data: Buffer.from('<?xml version="1.0"?><error><message>Server Error</message></error>'),
+        statusText: "Internal Server Error",
+        headers: {},
+        config: {} as any,
+      };
+      (axios as any).mockResolvedValue(xmlErrorResponse);
+
+      await expect(
+        runStepConfig({
+          config: testEndpoint,
+          payload: {},
+          credentials: {},
+          options: { retries: 0 },
+          metadata: {},
+        }),
+      ).rejects.toThrow(/API call failed with status 500/);
+    });
   });
 
-  describe("API Self-Healing Integration", () => {
-    it("should test that isSelfHealingEnabled is used correctly for API calls", () => {
-      // Import the function to test the logic directly
+  describe("Error Detection Modes", () => {
+    const testEndpoint: ApiConfig = {
+      urlHost: "https://api.example.com",
+      urlPath: "v1/test",
+      method: HttpMethod.GET,
+      id: "test-endpoint-id",
+      instruction: "Test API call",
+    };
 
-      // Test API self-healing enabled scenarios
-      expect(isSelfHealingEnabled({ selfHealing: SelfHealingMode.ENABLED }, "api")).toBe(true);
-      expect(isSelfHealingEnabled({ selfHealing: SelfHealingMode.REQUEST_ONLY }, "api")).toBe(true);
+    it("SMART mode should detect JSON error keys in 200 response", async () => {
+      const mockResponse = {
+        status: 200,
+        data: Buffer.from(JSON.stringify({ error: "Something went wrong" })),
+        statusText: "OK",
+        headers: {},
+        config: {} as any,
+      };
+      (axios as any).mockResolvedValueOnce(mockResponse);
 
-      // Test API self-healing disabled scenarios
-      expect(isSelfHealingEnabled({ selfHealing: SelfHealingMode.DISABLED }, "api")).toBe(false);
-      expect(isSelfHealingEnabled({ selfHealing: SelfHealingMode.TRANSFORM_ONLY }, "api")).toBe(
-        false,
-      );
-
-      // Test defaults
-      expect(isSelfHealingEnabled({}, "api")).toBe(false);
-      expect(isSelfHealingEnabled(undefined, "api")).toBe(false);
+      await expect(
+        runStepConfig({
+          config: testEndpoint,
+          payload: {},
+          credentials: {},
+          options: { retries: 0 },
+          metadata: {},
+          continueOnFailure: false,
+        }),
+      ).rejects.toThrow(/appears to be an error/);
     });
 
-    it("should verify self-healing flag is passed to API execution logic", () => {
-      // This test verifies the integration between the self-healing flag and API calls
-      // The actual executeApiCall function uses isSelfHealingEnabled(options, "api") internally
-      // and this has been verified by code inspection in the diff
-      expect(true).toBe(true); // Placeholder test for self-healing integration
+    it("continueOnFailure=true should NOT detect JSON error keys in 200 response", async () => {
+      const mockResponse = {
+        status: 200,
+        data: Buffer.from(JSON.stringify({ error: "Something went wrong" })),
+        statusText: "OK",
+        headers: {},
+        config: {} as any,
+      };
+      (axios as any).mockResolvedValueOnce(mockResponse);
+
+      const result = await runStepConfig({
+        config: testEndpoint,
+        payload: {},
+        credentials: {},
+        options: { retries: 0 },
+        metadata: {},
+        continueOnFailure: true,
+      });
+
+      expect(result.statusCode).toBe(200);
+      expect(result.data).toEqual({ error: "Something went wrong" });
+    });
+
+    it("continueOnFailure=true should NOT detect any errors in 200 response", async () => {
+      const mockResponse = {
+        status: 200,
+        data: Buffer.from(JSON.stringify({ error: "Something went wrong", failure: true })),
+        statusText: "OK",
+        headers: {},
+        config: {} as any,
+      };
+      (axios as any).mockResolvedValueOnce(mockResponse);
+
+      const result = await runStepConfig({
+        config: testEndpoint,
+        payload: {},
+        credentials: {},
+        options: { retries: 0 },
+        metadata: {},
+        continueOnFailure: true,
+      });
+
+      expect(result.statusCode).toBe(200);
+      expect(result.data).toEqual({ error: "Something went wrong", failure: true });
+    });
+
+    it("default mode should still reject non-2xx status codes", async () => {
+      const mockResponse = {
+        status: 400,
+        data: Buffer.from(JSON.stringify({ message: "Bad request" })),
+        statusText: "Bad Request",
+        headers: {},
+        config: {} as any,
+      };
+      (axios as any).mockResolvedValue(mockResponse);
+
+      await expect(
+        runStepConfig({
+          config: testEndpoint,
+          payload: {},
+          credentials: {},
+          options: { retries: 0 },
+          metadata: {},
+          continueOnFailure: false,
+        }),
+      ).rejects.toThrow(/API call failed with status 400/);
+    });
+
+    it("continueOnFailure=true should NOT reject non-2xx status codes", async () => {
+      const mockResponse = {
+        status: 400,
+        data: Buffer.from(JSON.stringify({ message: "Bad request" })),
+        statusText: "Bad Request",
+        headers: {},
+        config: {} as any,
+      };
+      (axios as any).mockResolvedValueOnce(mockResponse);
+
+      const result = await runStepConfig({
+        config: testEndpoint,
+        payload: {},
+        credentials: {},
+        options: { retries: 0 },
+        metadata: {},
+        continueOnFailure: true,
+      });
+
+      expect(result.statusCode).toBe(400);
+      expect(result.data).toEqual({ message: "Bad request" });
+    });
+
+    it("default mode should detect status field with error code in 200 response", async () => {
+      const mockResponse = {
+        status: 200,
+        data: Buffer.from(JSON.stringify({ status: 404, message: "Not found" })),
+        statusText: "OK",
+        headers: {},
+        config: {} as any,
+      };
+      (axios as any).mockResolvedValueOnce(mockResponse);
+
+      await expect(
+        runStepConfig({
+          config: testEndpoint,
+          payload: {},
+          credentials: {},
+          options: { retries: 0 },
+          metadata: {},
+          continueOnFailure: false,
+        }),
+      ).rejects.toThrow(/appears to be an error/);
+    });
+
+    it("defaults to smart error detection when continueOnFailure not specified", async () => {
+      const mockResponse = {
+        status: 200,
+        data: Buffer.from(JSON.stringify({ error: "Something failed" })),
+        statusText: "OK",
+        headers: {},
+        config: {} as any,
+      };
+      (axios as any).mockResolvedValueOnce(mockResponse);
+
+      await expect(
+        runStepConfig({
+          config: testEndpoint,
+          payload: {},
+          credentials: {},
+          options: { retries: 0 },
+          metadata: {},
+        }),
+      ).rejects.toThrow(/appears to be an error/);
     });
   });
-});
 
-describe("Basic Auth Utilities", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
+  describe("Basic Auth Utilities", () => {
+    beforeEach(() => {
+      vi.clearAllMocks();
+    });
+
+    afterEach(() => {
+      vi.resetAllMocks();
+    });
+
+    describe("convertBasicAuthToBase64", () => {
+      it("should encode username:password format", () => {
+        expect(convertBasicAuthToBase64("Basic test:1234")).toBe("Basic dGVzdDoxMjM0");
+      });
+
+      it("should leave already encoded credentials unchanged", () => {
+        expect(convertBasicAuthToBase64("Basic dGVzdDoxMjM0")).toBe("Basic dGVzdDoxMjM0");
+      });
+
+      it("should leave non-Basic Auth headers unchanged", () => {
+        expect(convertBasicAuthToBase64("Bearer token123")).toBe("Bearer token123");
+      });
+
+      it("should handle undefined or null values", () => {
+        expect(convertBasicAuthToBase64(undefined)).toBeUndefined();
+        expect(convertBasicAuthToBase64(null)).toBeNull();
+      });
+    });
   });
 
-  afterEach(() => {
-    vi.resetAllMocks();
-  });
+  describe("HttpStepExecutionStrategy", () => {
+    const strategy = new HttpStepExecutionStrategy();
 
-  describe("convertBasicAuthToBase64", () => {
-    it("should encode username:password format", () => {
-      expect(convertBasicAuthToBase64("Basic test:1234")).toBe("Basic dGVzdDoxMjM0");
-    });
+    describe("shouldExecute", () => {
+      it("should return true for http:// URLs", () => {
+        expect(strategy.shouldExecute("http://api.example.com")).toBe(true);
+      });
 
-    it("should leave already encoded credentials unchanged", () => {
-      expect(convertBasicAuthToBase64("Basic dGVzdDoxMjM0")).toBe("Basic dGVzdDoxMjM0");
-    });
+      it("should return true for https:// URLs", () => {
+        expect(strategy.shouldExecute("https://api.example.com")).toBe(true);
+      });
 
-    it("should leave non-Basic Auth headers unchanged", () => {
-      expect(convertBasicAuthToBase64("Bearer token123")).toBe("Bearer token123");
-    });
+      it("should return false for postgres:// URLs", () => {
+        expect(strategy.shouldExecute("postgres://user:pass@localhost:5432")).toBe(false);
+      });
 
-    it("should handle undefined or null values", () => {
-      expect(convertBasicAuthToBase64(undefined)).toBeUndefined();
-      expect(convertBasicAuthToBase64(null)).toBeNull();
-    });
-  });
-});
+      it("should return false for ftp:// URLs", () => {
+        expect(strategy.shouldExecute("ftp://files.example.com")).toBe(false);
+      });
 
-describe("HttpStepExecutionStrategy", () => {
-  const strategy = new HttpStepExecutionStrategy();
-
-  describe("shouldExecute", () => {
-    it("should return true for http:// URLs", () => {
-      expect(strategy.shouldExecute("http://api.example.com")).toBe(true);
-    });
-
-    it("should return true for https:// URLs", () => {
-      expect(strategy.shouldExecute("https://api.example.com")).toBe(true);
-    });
-
-    it("should return false for postgres:// URLs", () => {
-      expect(strategy.shouldExecute("postgres://user:pass@localhost:5432")).toBe(false);
-    });
-
-    it("should return false for ftp:// URLs", () => {
-      expect(strategy.shouldExecute("ftp://files.example.com")).toBe(false);
-    });
-
-    it("should return false for empty URL", () => {
-      expect(strategy.shouldExecute("")).toBe(false);
+      it("should return false for empty URL", () => {
+        expect(strategy.shouldExecute("")).toBe(false);
+      });
     });
   });
 });

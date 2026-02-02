@@ -73,6 +73,7 @@ export enum SupportedFileType {
   JSON = "JSON",
   CSV = "CSV",
   XML = "XML",
+  HTML = "HTML",
   YAML = "YAML",
   EXCEL = "EXCEL",
   PDF = "PDF",
@@ -157,13 +158,6 @@ export enum UpsertMode {
 export enum CredentialMode {
   MERGE = "MERGE",
   REPLACE = "REPLACE",
-}
-
-export enum SelfHealingMode {
-  ENABLED = "ENABLED",
-  TRANSFORM_ONLY = "TRANSFORM_ONLY",
-  REQUEST_ONLY = "REQUEST_ONLY",
-  DISABLED = "DISABLED",
 }
 
 export enum RunStatus {
@@ -393,12 +387,10 @@ export type WorkflowInputRequest = ToolInputRequest;
 
 export type RequestOptions = {
   cacheMode?: CacheMode;
-  selfHealing?: SelfHealingMode;
   timeout?: number;
   retries?: number;
   retryDelay?: number;
   webhookUrl?: string;
-  testMode?: boolean;
 };
 
 export interface RunMetadata {
@@ -450,14 +442,6 @@ export interface ToolArgs {
   traceId?: string;
 }
 
-export interface GenerateTransformArgs {
-  currentTransform?: string;
-  responseSchema?: JSONSchema;
-  stepData: Record<string, any>;
-  errorMessage?: string;
-  instruction?: string;
-}
-
 // Legacy alias
 export type WorkflowArgs = ToolArgs;
 
@@ -492,15 +476,6 @@ export interface FixToolArgs {
 export interface FixToolResult {
   tool: Tool;
   diffs: ToolDiff[];
-}
-
-export interface GenerateStepConfigArgs {
-  systemId?: string;
-  currentDataSelector?: string;
-  currentStepConfig?: Partial<ApiConfig>;
-  stepInput?: Record<string, any>;
-  credentials?: Record<string, string>;
-  errorMessage?: string;
 }
 
 export type SystemList = {
@@ -633,6 +608,43 @@ export interface AgentRequest {
   runtimeContext?: string;
   agentParams?: Record<string, any>;
   filePayloads?: Record<string, any>;
+}
+
+// OpenAPI format types for API responses
+export interface OpenAPIPagination {
+  type: string;
+  pageSize?: string;
+  cursorPath?: string;
+  stopCondition?: string;
+}
+
+export interface OpenAPIToolStep {
+  id: string;
+  url: string;
+  method: string;
+  queryParams?: Record<string, unknown>;
+  headers?: Record<string, unknown>;
+  body?: string;
+  pagination?: OpenAPIPagination;
+  systemId?: string;
+  instruction?: string;
+  modify?: boolean;
+  dataSelector?: string;
+  failureBehavior?: "fail" | "continue";
+}
+
+export interface OpenAPITool {
+  id: string;
+  name: string;
+  version?: string;
+  instruction?: string;
+  inputSchema?: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
+  steps: OpenAPIToolStep[];
+  outputTransform?: string;
+  archived?: boolean;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 // ============================================
