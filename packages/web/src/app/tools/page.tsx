@@ -11,6 +11,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/src/components/ui/table";
+
+import { DeployButton } from "@/src/components/tools/deploy/DeployButton";
 import { FolderSelector, useFolderFilter } from "@/src/components/tools/folders/FolderSelector";
 import { InlineFolderPicker } from "@/src/components/tools/folders/InlineFolderPicker";
 import { CopyButton } from "@/src/components/tools/shared/CopyButton";
@@ -146,6 +148,7 @@ const ToolsTable = () => {
     }
   }, [isInitiallyLoading, hasCompletedInitialLoad]);
 
+  const nonArchivedTools = tools.filter((t) => !t.archived);
   const shouldShowStepper =
     manuallyOpenedStepper || (hasCompletedInitialLoad && tools.length === 0);
 
@@ -365,14 +368,17 @@ const ToolsTable = () => {
                     <TableCell className="w-[140px]">
                       <div className="flex justify-end gap-2">
                         <Button
-                          variant="default"
+                          variant="outline"
                           size="sm"
                           onClick={(e) => handlePlayTool(e, tool.id)}
-                          className="gap-2"
+                          className="gap-2 border-border/40"
                         >
                           <Hammer className="h-4 w-4" />
                           View
                         </Button>
+                        {!tool.archived && (
+                          <DeployButton tool={tool} className="gap-2 border-border/40" />
+                        )}
                         <ToolActionsMenu tool={tool} />
                       </div>
                     </TableCell>

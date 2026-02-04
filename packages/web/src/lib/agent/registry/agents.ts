@@ -1,11 +1,20 @@
 import type { AgentDefinition } from "../agent-types";
-import { AGENT_TOOL_SET, PLAYGROUND_TOOL_SET } from "./tools";
-import { MAIN_AGENT_SYSTEM_PROMPT, TOOL_PLAYGROUND_AGENT_SYSTEM_PROMPT } from "../agent-prompts";
-import { initializeMainAgentContext, initializePlaygroundAgentContext } from "../agent-context";
+import { AGENT_TOOL_SET, PLAYGROUND_TOOL_SET, SYSTEM_PLAYGROUND_TOOL_SET } from "./tools";
+import {
+  MAIN_AGENT_SYSTEM_PROMPT,
+  TOOL_PLAYGROUND_AGENT_SYSTEM_PROMPT,
+  SYSTEM_PLAYGROUND_AGENT_PROMPT,
+} from "../agent-prompts";
+import {
+  initializeMainAgentContext,
+  initializeToolPlaygroundAgentContext,
+  initializeSystemPlaygroundContext,
+} from "../agent-context";
 
 export enum AgentType {
   MAIN = "main",
   PLAYGROUND = "playground",
+  SYSTEM_PLAYGROUND = "system_playground",
 }
 
 export const AGENT_REGISTRY: Record<AgentType, AgentDefinition> = {
@@ -19,7 +28,13 @@ export const AGENT_REGISTRY: Record<AgentType, AgentDefinition> = {
     id: AgentType.PLAYGROUND,
     systemPrompt: TOOL_PLAYGROUND_AGENT_SYSTEM_PROMPT,
     toolSet: PLAYGROUND_TOOL_SET,
-    initialContextGenerator: initializePlaygroundAgentContext,
+    initialContextGenerator: initializeToolPlaygroundAgentContext,
+  },
+  [AgentType.SYSTEM_PLAYGROUND]: {
+    id: AgentType.SYSTEM_PLAYGROUND,
+    systemPrompt: SYSTEM_PLAYGROUND_AGENT_PROMPT,
+    toolSet: SYSTEM_PLAYGROUND_TOOL_SET,
+    initialContextGenerator: initializeSystemPlaygroundContext,
   },
 };
 

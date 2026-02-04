@@ -1,4 +1,3 @@
-// Service metadata - lightweight context for logging and tracing in service classes
 export type ServiceMetadata = {
   traceId?: string;
   orgId?: string;
@@ -28,6 +27,7 @@ export interface Message {
   tools?: ToolCall[];
   parts?: MessagePart[];
   isStreaming?: boolean;
+  isHidden?: boolean;
   attachedFiles?: Array<{
     name: string;
     size?: number;
@@ -291,23 +291,16 @@ export interface ToolResult extends BaseResult {
   stepResults: ToolStepResult[];
 }
 
-export interface CallEndpointArgs {
-  systemId?: string;
-  method: HttpMethod;
-  url: string;
-  headers?: Record<string, string>;
-  body?: string;
-  timeout?: number;
+export interface DocumentationFiles {
+  uploadFileIds?: string[];
+  scrapeFileIds?: string[];
+  openApiFileIds?: string[];
 }
 
-export interface CallEndpointResult {
-  success: boolean;
-  status?: number;
-  statusText?: string;
-  headers?: Record<string, string>;
-  body?: any;
-  error?: string;
-  duration: number;
+export interface DocumentationFiles {
+  uploadFileIds?: string[];
+  scrapeFileIds?: string[];
+  openApiFileIds?: string[];
 }
 
 export interface System extends BaseConfig {
@@ -326,6 +319,7 @@ export interface System extends BaseConfig {
   icon?: string;
   metadata?: Record<string, any>;
   templateName?: string;
+  documentationFiles?: DocumentationFiles;
 }
 
 export interface SystemInput {
@@ -651,12 +645,14 @@ export interface OpenAPITool {
 // NOTIFICATION TYPES
 // ============================================
 
+// Notification mode - realtime for immediate alerts, summary for periodic digests
+export type NotificationMode = "realtime" | "daily_summary" | "weekly_summary";
+
 // Rule conditions - permissive data model, UI can restrict
 export interface NotificationRuleConditions {
   status: "failed" | "success" | "any";
-  toolIdPattern?: string; // Glob pattern like "prod-*"
-  requestSources?: RequestSource[]; // Empty/undefined = all sources
-  // Future extensibility
+  toolIdPattern?: string;
+  requestSources?: RequestSource[];
   tags?: string[];
   folders?: string[];
 }
@@ -664,50 +660,51 @@ export interface NotificationRuleConditions {
 export interface NotificationRule {
   id: string;
   enabled: boolean;
+  mode?: NotificationMode; // Defaults to "realtime" for backward compatibility
   conditions: NotificationRuleConditions;
 }
 
-// ============================================
-// CHANNEL CONFIGURATIONS
-// ============================================
+// Summary payload for daily/weekly notification digests
+export interface NotificationSummaryPayload {
+  period: "daily" | "weekly";
+  periodStart: string; // ISO date
+  periodEnd: string; // ISO date
+  requestSources: RequestSource[]; // The filters that were applied
+  toolStats: Array<{
+    toolId: string;
+    successCount: number;
+    failedCount: number;
+  }>;
+  adminUrl: string;
+}
 
 export type NotificationChannelStatus = "active" | "failing" | "disabled";
 
-// Base config all channels share
 export interface BaseChannelConfig {
   enabled: boolean;
-  rules: NotificationRule[]; // Rules are per-channel
-  // Circuit breaker / health tracking
+  rules: NotificationRule[];
   status: NotificationChannelStatus;
   consecutiveFailures: number;
   lastError?: string;
   lastErrorAt?: string;
 }
 
-// Slack-specific configuration
 export type SlackAuthType = "webhook" | "bot_token" | "oauth";
 
 export interface SlackChannelConfig extends BaseChannelConfig {
   authType: SlackAuthType;
-  webhookUrl?: string; // For webhook auth
-  botToken?: string; // For bot_token auth (encrypted)
-  channelId?: string; // For bot_token auth
-  // OAuth fields for future
+  webhookUrl?: string;
+  botToken?: string;
+  channelId?: string;
   accessToken?: string;
   teamId?: string;
 }
 
-// Email channel (future)
 export interface EmailChannelConfig extends BaseChannelConfig {
   recipients: string[];
   fromAddress?: string;
 }
 
-// ============================================
-// NOTIFICATION SETTINGS
-// ============================================
-
-// Channels keyed by type - easy to add new ones
 export interface NotificationChannels {
   slack?: SlackChannelConfig;
   email?: EmailChannelConfig;
@@ -716,17 +713,13 @@ export interface NotificationChannels {
 export interface NotificationRateLimit {
   maxPerHour: number;
   currentCount: number;
-  windowStart: string; // ISO timestamp
+  windowStart: string;
 }
 
 export interface NotificationSettings {
   channels: NotificationChannels;
   rateLimit: NotificationRateLimit;
 }
-
-// ============================================
-// ORG SETTINGS
-// ============================================
 
 export interface OrgSettings {
   orgId: string;

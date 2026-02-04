@@ -29,9 +29,7 @@ export function ToolCallWrapper({
   const [liveElapsed, setLiveElapsed] = useState<number>(0);
 
   useEffect(() => {
-    if (!openByDefault) {
-      setIsExpanded(false);
-    }
+    setIsExpanded(openByDefault);
   }, [openByDefault]);
 
   useEffect(() => {
@@ -171,7 +169,7 @@ export function ToolCallWrapper({
 
   return (
     <Collapsible open={isExpanded} onOpenChange={setIsExpanded}>
-      <div className="border rounded-lg bg-card">
+      <div className="border border-border/50 rounded-xl bg-gradient-to-br from-muted/50 to-muted/30 dark:from-muted/40 dark:to-muted/20 backdrop-blur-sm">
         <CollapsibleTrigger asChild>
           <div className="flex items-center justify-between p-4 cursor-pointer gap-2 min-w-0">
             <div className="flex items-center gap-2 min-w-0 flex-1">
@@ -238,7 +236,7 @@ export function ToolCallWrapper({
         <CollapsibleContent>
           <div className="px-4 pb-4">
             {displayStatus === "completed" &&
-              tool.name !== "call_endpoint" &&
+              tool.name !== "call_system" &&
               tool.name !== "edit_tool" &&
               tool.name !== "build_tool" &&
               tool.name !== "run_tool" &&

@@ -1,10 +1,8 @@
 import { useConfig } from "@/src/app/config-context";
 import { useSystems } from "@/src/app/systems-context";
 import { getAuthBadge } from "@/src/app/systems/page";
-import { SystemForm } from "@/src/components/systems/SystemForm";
 import { FileChip } from "@/src/components/ui/FileChip";
 import { useToast } from "@/src/hooks/use-toast";
-import { needsUIToTriggerDocFetch } from "@/src/lib/client-utils";
 import {
   formatBytes,
   MAX_TOTAL_FILE_SIZE_TOOLS,
@@ -12,39 +10,28 @@ import {
 } from "@/src/lib/file-utils";
 import { useFileUpload } from "./hooks/use-file-upload";
 import { SystemIcon } from "@/src/components/ui/system-icon";
-import { cn, composeUrl, getSimpleIcon, inputErrorStyles } from "@/src/lib/general-utils";
+import { SystemCarousel } from "@/src/components/ui/rotating-icon-gallery";
+import { cn, composeUrl, inputErrorStyles } from "@/src/lib/general-utils";
 import { tokenRegistry } from "@/src/lib/token-registry";
-import {
-  CredentialMode,
-  System,
-  SystemInput,
-  Tool,
-  UpsertMode,
-  SuperglueClient,
-} from "@superglue/shared";
-import {
-  ALLOWED_FILE_EXTENSIONS,
-  generateDefaultFromSchema,
-  systemOptions,
-} from "@superglue/shared";
-import { waitForSystemProcessing } from "@superglue/shared/utils";
+import { System, SystemInput, Tool, SuperglueClient, SystemConfig } from "@superglue/shared";
+import { ALLOWED_FILE_EXTENSIONS, generateDefaultFromSchema } from "@superglue/shared";
 import { Validator } from "jsonschema";
 import {
   Check,
   Clock,
   FileJson,
   FileWarning,
-  Globe,
   Key,
   Loader2,
   Paperclip,
-  Pencil,
   Plus,
   Wrench,
   X,
 } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { useAgentModal } from "../agent/AgentModalContext";
+import { useSystemPickerModal } from "../systems/SystemPickerModalContext";
 import { JsonCodeEditor } from "../editors/JsonCodeEditor";
 import JsonSchemaEditor from "../editors/JsonSchemaEditor";
 import { Button } from "../ui/button";
@@ -135,9 +122,11 @@ export function ToolBuilder({
   const [view, setView] = useState<ToolBuilderView>(initialView);
   const [isBuilding, setIsBuilding] = useState(false);
   const { toast } = useToast();
-  const superglueConfig = useConfig();
+  const router = useRouter();
+  const { openAgentModal } = useAgentModal();
+  const { openSystemPicker } = useSystemPickerModal();
 
-  const { systems, pendingDocIds, loading, setPendingDocIds, refreshSystems } = useSystems();
+  const { systems, pendingDocIds, loading } = useSystems();
 
   const [instruction, setInstruction] = useState(initialInstruction);
   const [payload, setPayload] = useState(initialPayload);
@@ -162,8 +151,6 @@ export function ToolBuilder({
   const [selectedSystemIds, setSelectedSystemIds] = useState<string[]>(initialSystemIds);
 
   const [systemSearch, setSystemSearch] = useState("");
-  const [showSystemForm, setShowSystemForm] = useState(false);
-  const [systemFormEdit, setSystemFormEdit] = useState<System | null>(null);
 
   const [validationErrors, setValidationErrors] = useState<Record<string, boolean>>({});
 
@@ -174,6 +161,7 @@ export function ToolBuilder({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const validationTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
+  const superglueConfig = useConfig();
   const client = useMemo(
     () =>
       new SuperglueClient({
@@ -184,14 +172,15 @@ export function ToolBuilder({
     [superglueConfig.superglueEndpoint, superglueConfig.apiEndpoint],
   );
 
-  const waitForSystemReady = useCallback(
-    (systemIds: string[]) => {
-      const clientAdapter = {
-        getSystem: (id: string) => client.getSystem(id),
-      };
-      return waitForSystemProcessing(clientAdapter, systemIds);
+  const handleAddSystem = useCallback(() => {
+    openSystemPicker();
+  }, [openSystemPicker]);
+
+  const handleEditSystem = useCallback(
+    (systemId: string) => {
+      router.push(`/systems/${encodeURIComponent(systemId)}`);
     },
-    [client],
+    [router],
   );
 
   const hasMeaningfulSchema = useMemo(
@@ -325,57 +314,6 @@ export function ToolBuilder({
     }
   };
 
-  const handleSystemFormSave = async (system: System): Promise<System | null> => {
-    setShowSystemForm(false);
-    setSystemFormEdit(null);
-
-    try {
-      const upsertMode = systemFormEdit ? UpsertMode.UPDATE : UpsertMode.CREATE;
-      const savedSystem = await client.upsertSystem(
-        system.id,
-        system,
-        upsertMode,
-        CredentialMode.REPLACE,
-      );
-      const willTriggerDocFetch = needsUIToTriggerDocFetch(savedSystem, systemFormEdit);
-
-      if (willTriggerDocFetch) {
-        setPendingDocIds((prev) => new Set([...prev, savedSystem.id]));
-
-        waitForSystemReady([savedSystem.id])
-          .then(() => {
-            setPendingDocIds((prev) => new Set([...prev].filter((id) => id !== savedSystem.id)));
-          })
-          .catch((error) => {
-            console.error("Error waiting for docs:", error);
-            setPendingDocIds((prev) => new Set([...prev].filter((id) => id !== savedSystem.id)));
-          });
-      }
-
-      setSelectedSystemIds((ids) => {
-        const newIds = ids.filter((id) => id !== (systemFormEdit?.id || system.id));
-        newIds.push(savedSystem.id);
-        return newIds;
-      });
-
-      await refreshSystems();
-      return savedSystem;
-    } catch (error) {
-      console.error("Error saving system:", error);
-      toast({
-        title: "Error Saving System",
-        description: error instanceof Error ? error.message : "Failed to save system",
-        variant: "destructive",
-      });
-      return null;
-    }
-  };
-
-  const handleSystemFormCancel = () => {
-    setShowSystemForm(false);
-    setSystemFormEdit(null);
-  };
-
   const handleBuildTool = async () => {
     const errors: Record<string, boolean> = {};
     if (!instruction.trim()) errors.instruction = true;
@@ -491,7 +429,7 @@ export function ToolBuilder({
                 variant="outline"
                 size="sm"
                 className="h-10 shrink-0"
-                onClick={() => setShowSystemForm(true)}
+                onClick={handleAddSystem}
               >
                 <Plus className="mr-2 h-4 w-4" /> Add System
               </Button>
@@ -500,9 +438,32 @@ export function ToolBuilder({
             {loading ? (
               <div className="h-[200px] bg-background" />
             ) : systems.length === 0 ? (
-              <div className="py-16 flex items-center justify-center">
-                <p className="text-sm text-muted-foreground italic">
-                  No systems added yet. Define the APIs or data sources your tool will use.
+              <div className="py-8 flex flex-col items-center justify-center gap-4">
+                <SystemCarousel
+                  onSystemSelect={(key, label, config) => {
+                    const hiddenContext = JSON.stringify({
+                      templateInfo: {
+                        apiUrl: config.apiUrl,
+                        docsUrl: config.docsUrl,
+                        openApiUrl: config.openApiUrl,
+                        preferredAuthType: config.preferredAuthType,
+                        hasOAuth: !!config.oauth,
+                      },
+                    });
+                    openAgentModal({
+                      userPrompt: `I want to set up ${label}`,
+                      systemPrompt: hiddenContext,
+                      chatTitle: label,
+                      chatIcon: config.icon,
+                    });
+                  }}
+                  className="w-full"
+                  showNavArrows
+                />
+                <p className="text-xs text-muted-foreground/80 text-center max-w-md">
+                  No systems added yet.
+                  <br />
+                  Click an icon or the "Add System" button to add a new system.
                 </p>
               </div>
             ) : (
@@ -567,24 +528,6 @@ export function ToolBuilder({
                                   )}
                                   {badge.label}
                                 </span>
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  className="h-8 w-8 text-foreground hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    setSystemFormEdit(sys);
-                                    setShowSystemForm(true);
-                                  }}
-                                  disabled={pendingDocIds.has(sys.id)}
-                                  title={
-                                    pendingDocIds.has(sys.id)
-                                      ? "Documentation is being processed"
-                                      : "Edit system"
-                                  }
-                                >
-                                  <Pencil className="h-4 w-4" />
-                                </Button>
                                 <button
                                   className={cn(
                                     "h-5 w-5 rounded border-2 transition-all duration-200 flex items-center justify-center",
@@ -609,7 +552,7 @@ export function ToolBuilder({
                         {filteredSystems.length === 0 && systemSearch.trim() !== "" && (
                           <div
                             className="flex items-center justify-between rounded-md px-4 py-3 transition-all duration-200 cursor-pointer bg-background border border-dashed border-muted-foreground/30 hover:bg-accent/50 hover:border-muted-foreground/50"
-                            onClick={() => setShowSystemForm(true)}
+                            onClick={handleAddSystem}
                           >
                             <div className="flex items-center gap-3 flex-1 min-w-0">
                               <div className="h-5 w-5 flex-shrink-0 rounded-full border-2 border-dashed border-muted-foreground/50 flex items-center justify-center">
@@ -631,7 +574,7 @@ export function ToolBuilder({
                                 className="h-8 w-8 text-muted-foreground hover:text-foreground"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  setShowSystemForm(true);
+                                  handleAddSystem();
                                 }}
                                 title="Create new system"
                               >
@@ -649,6 +592,7 @@ export function ToolBuilder({
 
             <div className="flex justify-end mt-3">
               <Button
+                variant="outline"
                 onClick={() => setView("instructions")}
                 className="h-8 px-4 rounded-full flex-shrink-0"
               >
@@ -660,24 +604,6 @@ export function ToolBuilder({
               </Button>
             </div>
           </div>
-
-          {showSystemForm &&
-            typeof document !== "undefined" &&
-            createPortal(
-              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
-                <div className="bg-background rounded-xl max-w-2xl w-full p-0">
-                  <SystemForm
-                    modal={true}
-                    system={systemFormEdit || undefined}
-                    onSave={handleSystemFormSave}
-                    onCancel={handleSystemFormCancel}
-                    systemOptions={systemOptions}
-                    getSimpleIcon={getSimpleIcon}
-                  />
-                </div>
-              </div>,
-              document.body,
-            )}
         </div>
       </div>
     );
@@ -1076,19 +1002,25 @@ export function ToolBuilder({
             <p className="text-sm text-muted-foreground text-center">Suggestions</p>
             <div className="flex flex-wrap gap-2 justify-center">
               {suggestions.map((suggestion, index) => (
-                <Button
+                <button
                   key={index}
-                  variant="outline"
-                  size="sm"
                   onClick={() => setInstruction(suggestion)}
-                  className="text-sm h-auto py-2 px-4 font-normal animate-fade-in whitespace-normal text-left max-w-full"
+                  className={cn(
+                    "text-sm h-auto py-2.5 px-4 font-normal animate-fade-in whitespace-normal text-left max-w-full",
+                    "rounded-xl transition-all duration-200",
+                    "bg-gradient-to-br from-muted/50 to-muted/30 dark:from-muted/30 dark:to-muted/20",
+                    "backdrop-blur-sm border border-border/50",
+                    "shadow-sm",
+                    "hover:shadow-md hover:border-border/60 hover:from-muted/60 hover:to-muted/40",
+                    "hover:scale-[1.01] active:scale-[0.99]",
+                  )}
                   style={{
                     animationDelay: `${index * 150}ms`,
                     animationFillMode: "backwards",
                   }}
                 >
                   {suggestion}
-                </Button>
+                </button>
               ))}
             </div>
           </div>

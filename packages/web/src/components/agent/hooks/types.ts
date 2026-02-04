@@ -6,6 +6,7 @@ import { UserAction } from "@/src/lib/agent/agent-types";
 export interface ToolConfirmationMetadata {
   timing: "before" | "after";
   validActions: ConfirmationAction[];
+  shouldAutoExecute?: boolean;
 }
 
 export interface UploadedFile {
@@ -56,7 +57,7 @@ export interface UseAgentToolsReturn {
 export interface UseAgentRequestReturn {
   sendAgentRequest: (
     userMessage?: string,
-    options?: { userActions?: UserAction[]; hiddenContext?: string },
+    options?: { userActions?: UserAction[]; hiddenContext?: string; hideUserMessage?: boolean },
   ) => Promise<void>;
   bufferAction: (action: UserAction) => void;
   actionBufferRef: React.MutableRefObject<UserAction[]>;

@@ -1,11 +1,22 @@
 import { Badge } from "@/src/components/ui/badge";
 import { Button } from "@/src/components/ui/button";
+import { MiniCard, StatusIndicator, TriggerCard } from "@/src/components/ui/mini-card";
+import { SystemIcon } from "@/src/components/ui/system-icon";
 import { buildPreviousStepResults, cn } from "@/src/lib/general-utils";
 import { buildCategorizedSources } from "@/src/lib/templating-utils";
-import { ChevronLeft, ChevronRight, Plus } from "lucide-react";
+import {
+  Blocks,
+  ChevronLeft,
+  ChevronRight,
+  FileJson,
+  FilePlay,
+  OctagonAlert,
+  Plus,
+  RotateCw,
+  Zap,
+} from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { FinalTransformMiniStepCard, TransformItem } from "./cards/FinalTransformCard";
-import { MiniStepCard } from "./cards/MiniStepCard";
 import { PayloadMiniStepCard, PayloadItem } from "./cards/PayloadCard";
 import { SpotlightStepCard, StepItem } from "./cards/SpotlightStepCard";
 import { useExecution, useToolConfig } from "./context";
@@ -14,15 +25,17 @@ import { InstructionDisplay } from "./shared/InstructionDisplay";
 import { TriggersCard } from "./cards/TriggersCard";
 import { useRightSidebar } from "../sidebar/RightSidebarContext";
 
-export interface TriggerItem {
-  type: "trigger";
-}
+const RUNNING_STATUS = {
+  text: "Running",
+  color: "text-amber-600 dark:text-amber-400",
+  dotColor: "bg-amber-600 dark:bg-amber-400",
+  animate: true,
+} as const;
 
-export type ToolItem = PayloadItem | StepItem | TransformItem | TriggerItem;
+export type ToolItem = PayloadItem | StepItem | TransformItem;
 
 export interface ToolStepGalleryProps {
   onStepEdit?: (stepId: string, updatedStep: any, isUserInitiated?: boolean) => void;
-  onInstructionEdit?: () => void;
   onExecuteStep?: (stepIndex: number) => Promise<void>;
   onExecuteStepWithLimit?: (stepIndex: number, limit: number) => Promise<void>;
   onExecuteTransform?: (schema: string, transform: string) => Promise<void>;
@@ -45,7 +58,6 @@ export interface ToolStepGalleryProps {
 
 export function ToolStepGallery({
   onStepEdit: originalOnStepEdit,
-  onInstructionEdit,
   onExecuteStep,
   onExecuteStepWithLimit,
   onExecuteTransform,
@@ -63,8 +75,18 @@ export function ToolStepGallery({
   embedded = false,
 }: ToolStepGalleryProps) {
   // === CONTEXT ===
-  const { tool, steps, payload, systems, inputSchema, responseSchema, finalTransform, setSteps } =
-    useToolConfig();
+  const {
+    tool,
+    steps,
+    payload,
+    systems,
+    inputSchema,
+    responseSchema,
+    finalTransform,
+    setSteps,
+    setInstruction,
+    isPayloadReferenced,
+  } = useToolConfig();
 
   const {
     isExecutingAny,
@@ -74,6 +96,7 @@ export function ToolStepGallery({
     stepResultsMap,
     isRunningTransform,
     isFixingTransform,
+    getStepStatusInfo,
   } = useExecution();
 
   // === DERIVED VALUES FROM CONTEXT ===
@@ -106,11 +129,6 @@ export function ToolStepGallery({
   // === TOOL ITEMS ===
   const toolItems = useMemo((): ToolItem[] => {
     const items: ToolItem[] = [];
-
-    // Trigger (first item for saved tools)
-    if (isSavedTool) {
-      items.push({ type: "trigger" } as TriggerItem);
-    }
 
     // Payload
     items.push({
@@ -157,7 +175,6 @@ export function ToolStepGallery({
 
     return items;
   }, [
-    isSavedTool,
     payloadText,
     inputSchema,
     steps,
@@ -171,18 +188,19 @@ export function ToolStepGallery({
     filePayloads,
   ]);
 
+  // Trigger is separate from navigation - it's a visual prefix to the first card
+  const [showTriggerContent, setShowTriggerContent] = useState(false);
+
   // Item count is now dynamic based on toolItems
   const itemCount = toolItems.length;
 
-  // Calculate initial index accounting for trigger card on saved tools
+  // Calculate initial index - start at first step if valid, otherwise payload
   const initialNavIndex = useMemo(() => {
-    const triggerOffset = isSavedTool ? 1 : 0;
-    // If we have steps and payload is valid, start at first step; otherwise start at payload
     if (steps.length > 0 && isPayloadValid) {
-      return triggerOffset + 1; // payload + first step
+      return 1; // first step
     }
-    return triggerOffset; // payload (or trigger for saved tools)
-  }, [isSavedTool, steps.length, isPayloadValid]);
+    return 0; // payload
+  }, [steps.length, isPayloadValid]);
 
   // === NAVIGATION ===
   const {
@@ -208,6 +226,52 @@ export function ToolStepGallery({
     setActiveStepItemCount(itemCount);
   }, []);
 
+  // Custom keyboard navigation that includes trigger
+  useEffect(() => {
+    if (!isSavedTool) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement ||
+        (e.target as HTMLElement).isContentEditable
+      )
+        return;
+
+      if (isConfiguratorEditing) return;
+
+      const activeElement = document.activeElement;
+      if (
+        activeElement?.closest("[data-radix-popper-content-wrapper]") ||
+        activeElement?.closest(".monaco-editor")
+      )
+        return;
+
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        e.stopPropagation();
+        if (showTriggerContent) {
+          return;
+        } else if (activeIndex === 0) {
+          setShowTriggerContent(true);
+        } else {
+          handleNavigation("prev");
+        }
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        e.stopPropagation();
+        if (showTriggerContent) {
+          setShowTriggerContent(false);
+        } else {
+          handleNavigation("next");
+        }
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown, true);
+    return () => window.removeEventListener("keydown", handleKeyDown, true);
+  }, [isSavedTool, showTriggerContent, activeIndex, isConfiguratorEditing, handleNavigation]);
+
   const currentItem = toolItems[activeIndex];
   const indicatorIndices = toolItems.map((_, idx) => idx);
 
@@ -220,12 +284,15 @@ export function ToolStepGallery({
   // === VISIBLE CARDS CALCULATION ===
   const visibleCardsData = useMemo(() => {
     const totalCards = toolItems.length;
-    const CARD_WIDTH = 150;
+    const CARD_WIDTH = 170;
     const BUTTON_SIZE = 32;
     const BUTTON_SPACING = 18;
     const SEPARATOR_WIDTH = BUTTON_SIZE + BUTTON_SPACING * 2;
     const EDGE_PADDING = 16;
-    const available = Math.max(0, containerWidth - EDGE_PADDING * 2);
+    const TRIGGER_WIDTH = 32;
+    const TRIGGER_GAP = 32;
+    const triggerSpace = isSavedTool ? TRIGGER_WIDTH + TRIGGER_GAP : 0;
+    const available = Math.max(0, containerWidth - EDGE_PADDING * 2 - triggerSpace);
 
     let cardsToShow = 1;
     const maxCandidates = Math.min(totalCards, 12);
@@ -249,7 +316,6 @@ export function ToolStepGallery({
 
     const visibleItems = toolItems.slice(startIdx, endIdx);
     const visibleIndices = visibleItems.map((_, i) => startIdx + i);
-    const count = Math.max(1, visibleItems.length);
 
     return {
       visibleItems,
@@ -262,7 +328,7 @@ export function ToolStepGallery({
       sepWidth: SEPARATOR_WIDTH,
       cardWidth: CARD_WIDTH,
     };
-  }, [toolItems, containerWidth, activeIndex]);
+  }, [toolItems, containerWidth, activeIndex, isSavedTool]);
 
   // Update hidden counts for badges
   useEffect(() => {
@@ -323,9 +389,7 @@ export function ToolStepGallery({
     if (!showStepOutputSignal || !focusStepId) return;
     const idx = steps.findIndex((s: any) => s.id === focusStepId);
     if (idx >= 0) {
-      // +1 for payload, +1 more for trigger if saved tool
-      const offset = isSavedTool ? 2 : 1;
-      navigateToIndex(idx + offset);
+      navigateToIndex(idx + 1); // +1 for payload
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showStepOutputSignal, focusStepId]);
@@ -351,7 +415,7 @@ export function ToolStepGallery({
           <div className="w-full">
             <InstructionDisplay
               instruction={instruction}
-              onEdit={onInstructionEdit}
+              onSave={setInstruction}
               showEditButton={true}
             />
           </div>
@@ -365,12 +429,15 @@ export function ToolStepGallery({
         style={{ scrollbarGutter: "stable" }}
       >
         <div className="space-y-6">
-          <div className="flex items-center gap-0">
-            <div className="relative">
+          <div className="flex items-center gap-2">
+            <div className="relative flex-shrink-0">
               <Button
                 variant="outline"
                 size="icon"
-                onClick={() => handleNavigation("prev")}
+                onClick={() => {
+                  setShowTriggerContent(false);
+                  handleNavigation("prev");
+                }}
                 disabled={activeIndex === 0}
                 className={cn(
                   "shrink-0 h-9 w-9",
@@ -387,7 +454,7 @@ export function ToolStepGallery({
                   variant="default"
                   className={cn(
                     "absolute -top-1 -right-1 h-4 min-w-4 px-1 text-[10px] font-bold flex items-center justify-center",
-                    !isPayloadValid
+                    !isPayloadValid || !isPayloadReferenced
                       ? "bg-amber-500 text-white"
                       : "bg-primary text-primary-foreground",
                   )}
@@ -397,11 +464,11 @@ export function ToolStepGallery({
               )}
             </div>
 
-            <div className="flex-1 overflow-hidden px-0">
+            <div className="flex-1 min-w-0 overflow-hidden">
               <div className="relative">
                 <div
                   ref={listRef}
-                  className="flex justify-center items-center overflow-visible py-3 relative z-10"
+                  className="flex justify-center items-center py-3 relative z-10"
                   style={{ minHeight: "140px" }}
                 >
                   {!isHydrated ? (
@@ -410,77 +477,38 @@ export function ToolStepGallery({
                     </div>
                   ) : (
                     <>
-                      {/* Left spacer */}
-                      {visibleCardsData.visibleItems.length > 0 && (
-                        <div
-                          style={{
-                            flex: `0 0 ${visibleCardsData.sepWidth}px`,
-                            width: `${visibleCardsData.sepWidth}px`,
-                          }}
-                        />
+                      {/* Trigger button - shown as prefix when first visible card is payload */}
+                      {isSavedTool && visibleCardsData.startIdx === 0 && (
+                        <>
+                          <TriggerCard
+                            isActive={showTriggerContent}
+                            onClick={() => setShowTriggerContent(!showTriggerContent)}
+                            icon={
+                              <Zap
+                                className={cn(
+                                  "h-4 w-4 absolute transition-colors",
+                                  showTriggerContent
+                                    ? "text-[#FFA500]"
+                                    : "text-muted-foreground group-hover:text-primary",
+                                )}
+                              />
+                            }
+                          />
+                          <div className="w-8" />
+                        </>
                       )}
                       {visibleCardsData.visibleItems.map((item, idx) => {
                         const globalIdx = visibleCardsData.visibleIndices[idx];
-                        const showArrow = idx < visibleCardsData.visibleItems.length - 1;
                         const cardWidth = visibleCardsData.cardWidth;
-
-                        const baseProps = {
-                          index: globalIdx,
-                          isActive: globalIdx === activeIndex,
-                          onClick: () => {
-                            handleCardClick(globalIdx);
-                          },
-                          isFirstCard: globalIdx === 0,
-                          isLastCard: globalIdx === visibleCardsData.totalCards - 1,
+                        const isActive = globalIdx === activeIndex && !showTriggerContent;
+                        const handleClick = () => {
+                          setShowTriggerContent(false);
+                          handleCardClick(globalIdx);
                         };
 
-                        // Build cardProps based on item type
-                        let cardProps: any;
-                        if (item.type === "trigger") {
-                          cardProps = {
-                            ...baseProps,
-                            type: "trigger" as const,
-                          };
-                        } else if (item.type === "payload") {
-                          cardProps = {
-                            ...baseProps,
-                            type: "payload" as const,
-                            isPayloadValid,
-                            payloadData: computedPayload,
-                          };
-                        } else if (item.type === "transform") {
-                          cardProps = {
-                            ...baseProps,
-                            type: "transform" as const,
-                            isRunning: isRunningTransform || isFixingTransform,
-                          };
-                        } else {
-                          // step type
-                          const stepItem = item as StepItem;
-                          const stepsBeforeThis = toolItems
-                            .slice(0, globalIdx)
-                            .filter((i) => i.type === "step").length;
-                          cardProps = {
-                            ...baseProps,
-                            type: "step" as const,
-                            step: stepItem.data,
-                            stepNumber: stepsBeforeThis,
-                            isRunning:
-                              isExecutingAny && currentExecutingStepIndex === stepsBeforeThis,
-                            isLoopStep:
-                              globalIdx === activeIndex &&
-                              activeStepItemCount !== null &&
-                              activeStepItemCount > 0,
-                          };
-                        }
+                        const canShowAddButton = setSteps && item.type !== "transform";
 
-                        // Determine if we should show add step button
-                        const canShowAddButton =
-                          setSteps && item.type !== "transform" && item.type !== "trigger";
-
-                        // Get the step index for insert
                         const getInsertIndex = () => {
-                          if (item.type === "trigger") return -1;
                           if (item.type === "payload") return -1;
                           if (item.type === "step") {
                             return (
@@ -491,22 +519,202 @@ export function ToolStepGallery({
                           return -1;
                         };
 
+                        const showSeparator = idx < visibleCardsData.visibleItems.length - 1;
+
+                        const renderCardContent = () => {
+                          if (item.type === "payload") {
+                            const isEmptyPayload =
+                              !computedPayload ||
+                              (typeof computedPayload === "object" &&
+                                Object.keys(computedPayload).length === 0) ||
+                              (typeof computedPayload === "string" &&
+                                (!(computedPayload as string).trim() ||
+                                  (computedPayload as string).trim() === "{}"));
+
+                            const showUnreferencedWarning =
+                              isPayloadValid && !isPayloadReferenced && !isEmptyPayload;
+
+                            return (
+                              <MiniCard isActive={isActive} onClick={handleClick}>
+                                <div className="flex-1 flex flex-col items-center justify-center">
+                                  <div
+                                    className={cn(
+                                      "p-2 rounded-full",
+                                      !isPayloadValid || showUnreferencedWarning
+                                        ? "bg-amber-500/20"
+                                        : "bg-primary/10",
+                                    )}
+                                  >
+                                    {!isPayloadValid || showUnreferencedWarning ? (
+                                      <svg
+                                        className="h-4 w-4 text-amber-600 dark:text-amber-400"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        strokeWidth="2"
+                                        strokeLinecap="round"
+                                        strokeLinejoin="round"
+                                      >
+                                        <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                                        <line x1="12" y1="9" x2="12" y2="13" />
+                                        <line x1="12" y1="17" x2="12.01" y2="17" />
+                                      </svg>
+                                    ) : (
+                                      <FileJson className="h-4 w-4 text-primary" />
+                                    )}
+                                  </div>
+                                  <span className="text-[11px] font-semibold mt-1.5">
+                                    Tool Input
+                                  </span>
+                                </div>
+                                <div className="flex items-center justify-center">
+                                  {!isPayloadValid ? (
+                                    <StatusIndicator
+                                      text="Required"
+                                      color="text-amber-600 dark:text-amber-400"
+                                      dotColor="bg-amber-600 dark:bg-amber-400"
+                                      animate
+                                    />
+                                  ) : showUnreferencedWarning ? (
+                                    <StatusIndicator
+                                      text="Unused in tool"
+                                      color="text-amber-600 dark:text-amber-400"
+                                      dotColor="bg-amber-600 dark:bg-amber-400"
+                                    />
+                                  ) : (
+                                    <span className="text-[9px] font-medium text-muted-foreground">
+                                      {isEmptyPayload ? "Empty" : "Provided"}
+                                    </span>
+                                  )}
+                                </div>
+                              </MiniCard>
+                            );
+                          }
+
+                          if (item.type === "transform") {
+                            const isRunning = isRunningTransform || isFixingTransform;
+                            const baseStatusInfo = getStepStatusInfo("__final_transform__");
+                            const statusInfo = isRunning ? RUNNING_STATUS : baseStatusInfo;
+
+                            return (
+                              <MiniCard isActive={isActive} onClick={handleClick}>
+                                <div className="flex-1 flex flex-col items-center justify-center">
+                                  <div className="p-2 rounded-full bg-primary/10">
+                                    <FilePlay className="h-4 w-4 text-primary" />
+                                  </div>
+                                  <span className="text-[11px] font-semibold mt-1.5">
+                                    Tool Result
+                                  </span>
+                                </div>
+                                <div className="flex items-center justify-center">
+                                  <StatusIndicator
+                                    text={statusInfo.text}
+                                    color={statusInfo.color}
+                                    dotColor={statusInfo.dotColor}
+                                    animate={statusInfo.animate}
+                                  />
+                                </div>
+                              </MiniCard>
+                            );
+                          }
+
+                          const stepItem = item as StepItem;
+                          const step = stepItem.data;
+                          const stepsBeforeThis = toolItems
+                            .slice(0, globalIdx)
+                            .filter((i) => i.type === "step").length;
+                          const isRunning =
+                            isExecutingAny && currentExecutingStepIndex === stepsBeforeThis;
+                          const isLoopStep =
+                            globalIdx === activeIndex &&
+                            activeStepItemCount !== null &&
+                            activeStepItemCount > 0;
+
+                          const baseStatusInfo = step.id
+                            ? getStepStatusInfo(step.id)
+                            : {
+                                text: "Pending",
+                                color: "text-gray-500 dark:text-gray-400",
+                                dotColor: "bg-gray-500 dark:bg-gray-400",
+                                animate: false,
+                              };
+                          const statusInfo = isRunning ? RUNNING_STATUS : baseStatusInfo;
+                          const linkedSystem =
+                            step.systemId && systems
+                              ? systems.find((sys) => sys.id === step.systemId)
+                              : undefined;
+
+                          return (
+                            <MiniCard isActive={isActive} onClick={handleClick}>
+                              <div className="h-full flex flex-col relative w-full">
+                                <div className="absolute top-0 left-0 flex items-center h-4">
+                                  <span className="text-[9px] px-1 py-0.5 rounded font-medium bg-primary/10 text-primary">
+                                    {stepsBeforeThis + 1}
+                                  </span>
+                                </div>
+                                <div className="absolute top-0 right-0 flex items-center gap-0.5 h-4">
+                                  {step?.modify === true && (
+                                    <OctagonAlert
+                                      className="h-3.5 w-3.5 text-amber-500 dark:text-amber-400"
+                                      aria-label="Modifies data"
+                                    />
+                                  )}
+                                  {isLoopStep && !(step?.modify === true) && (
+                                    <RotateCw
+                                      className="h-3 w-3 text-amber-600 dark:text-amber-400"
+                                      aria-label="Loop step"
+                                    />
+                                  )}
+                                </div>
+                                <div className="flex-1 flex flex-col items-center justify-center">
+                                  <div className="p-2 rounded-full bg-white dark:bg-gray-100 border border-border/50">
+                                    {linkedSystem ? (
+                                      <SystemIcon system={linkedSystem} size={18} />
+                                    ) : (
+                                      <Blocks className="h-4 w-4 text-muted-foreground" />
+                                    )}
+                                  </div>
+                                  {step.systemId && (
+                                    <span
+                                      className="text-[9px] text-muted-foreground mt-1 truncate max-w-[140px]"
+                                      title={step.systemId}
+                                    >
+                                      {step.systemId}
+                                    </span>
+                                  )}
+                                  <span
+                                    className="text-[11px] font-semibold mt-1 truncate max-w-[140px]"
+                                    title={step.id || `Step ${globalIdx}`}
+                                  >
+                                    {step.id || `Step ${globalIdx}`}
+                                  </span>
+                                </div>
+                                <div className="flex items-center justify-center">
+                                  <StatusIndicator
+                                    text={statusInfo.text}
+                                    color={statusInfo.color}
+                                    dotColor={statusInfo.dotColor}
+                                    animate={statusInfo.animate}
+                                  />
+                                </div>
+                              </div>
+                            </MiniCard>
+                          );
+                        };
+
                         return (
                           <React.Fragment key={globalIdx}>
-                            {item.type !== "trigger" && (
-                              <div
-                                className="flex items-center justify-center"
-                                style={{
-                                  flex: `0 0 ${cardWidth}px`,
-                                  width: `${cardWidth}px`,
-                                  maxWidth: `${cardWidth}px`,
-                                }}
-                              >
-                                <MiniStepCard {...cardProps} />
-                              </div>
-                            )}
-                            {item.type === "trigger" && <MiniStepCard {...cardProps} />}
-                            {showArrow && (
+                            <div
+                              className="flex items-center justify-center"
+                              style={{
+                                flex: `0 0 ${cardWidth}px`,
+                                width: `${cardWidth}px`,
+                                maxWidth: `${cardWidth}px`,
+                              }}
+                            >
+                              {renderCardContent()}
+                            </div>
+                            {showSeparator && (
                               <div
                                 style={{
                                   flex: `0 0 ${visibleCardsData.sepWidth}px`,
@@ -532,26 +740,20 @@ export function ToolStepGallery({
                           </React.Fragment>
                         );
                       })}
-                      {/* Right spacer */}
-                      {visibleCardsData.visibleItems.length > 0 && (
-                        <div
-                          style={{
-                            flex: `0 0 ${visibleCardsData.sepWidth}px`,
-                            width: `${visibleCardsData.sepWidth}px`,
-                          }}
-                        />
-                      )}
                     </>
                   )}
                 </div>
               </div>
             </div>
 
-            <div className="relative">
+            <div className="relative flex-shrink-0">
               <Button
                 variant="outline"
                 size="icon"
-                onClick={() => handleNavigation("next")}
+                onClick={() => {
+                  setShowTriggerContent(false);
+                  handleNavigation("next");
+                }}
                 disabled={activeIndex === toolItems.length - 1}
                 className="shrink-0 h-9 w-9"
                 title="Next"
@@ -576,6 +778,7 @@ export function ToolStepGallery({
                   key={`dot-${globalIdx}`}
                   onClick={() => {
                     if (isConfiguratorEditing) return;
+                    setShowTriggerContent(false);
                     navigateToIndex(globalIdx);
                   }}
                   className={cn(
@@ -590,9 +793,12 @@ export function ToolStepGallery({
           </div>
 
           <div className="min-h-[220px] max-w-6xl mx-auto">
-            {currentItem && currentItem.type === "trigger" ? (
-              <TriggersCard toolId={toolId} payload={computedPayload} compact />
-            ) : currentItem && currentItem.type === "payload" ? (
+            {isSavedTool && (
+              <div className={showTriggerContent ? "" : "hidden"}>
+                <TriggersCard toolId={toolId} payload={computedPayload} compact />
+              </div>
+            )}
+            {!showTriggerContent && currentItem && currentItem.type === "payload" ? (
               <PayloadMiniStepCard
                 onFilesUpload={onFilesUpload}
                 onFileRemove={onFileRemove}
@@ -600,12 +806,12 @@ export function ToolStepGallery({
                 totalFileSize={totalFileSize}
                 isPayloadValid={isPayloadValid}
               />
-            ) : currentItem && currentItem.type === "transform" ? (
+            ) : !showTriggerContent && currentItem && currentItem.type === "transform" ? (
               <FinalTransformMiniStepCard
                 onExecuteTransform={onExecuteTransform}
                 onAbort={isRunningTransform || isFixingTransform ? onAbort : undefined}
               />
-            ) : currentItem && currentItem.type === "step" ? (
+            ) : !showTriggerContent && currentItem && currentItem.type === "step" ? (
               <SpotlightStepCard
                 key={currentItem.data.id}
                 step={currentItem.data}
