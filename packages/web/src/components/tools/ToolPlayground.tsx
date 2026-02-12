@@ -426,7 +426,7 @@ function ToolPlaygroundInner({
   const defaultHeaderActions = (
     <div className="flex items-center gap-2">
       {isArchived ? (
-        <Button variant="outline" onClick={handleUnarchive} className="h-9 px-4">
+        <Button variant="glass" onClick={handleUnarchive} className="h-9 px-4 rounded-xl">
           <ArchiveRestore className="h-4 w-4" />
           Unarchive
         </Button>
@@ -434,22 +434,22 @@ function ToolPlaygroundInner({
         <>
           {loading ? (
             <Button
-              variant="outline"
+              variant="glass"
               onClick={handleStopExecution}
               disabled={saving}
-              className="h-9 px-4"
+              className="h-9 px-4 rounded-xl"
             >
               <Square className="h-4 w-4" />
               Stop Execution
             </Button>
           ) : (
             <Button
-              variant="outline"
+              variant="glass"
               onClick={handleRunAllSteps}
               disabled={
                 loading || saving || isExecutingStep != null || isExecutingTransform || isArchived
               }
-              className="h-9 px-4"
+              className="h-9 px-4 rounded-xl"
             >
               <Play className="h-4 w-4" />
               Run All Steps
@@ -461,16 +461,16 @@ function ToolPlaygroundInner({
               payload={computedPayload}
               onBeforeOpen={saveTool}
               size="default"
-              className="h-9 px-5"
+              className="h-9 px-5 rounded-xl"
               disabled={saving || loading}
             />
           )}
           {!isArchived && (
             <Button
-              variant="default"
+              variant="glass-primary"
               onClick={saveTool}
               disabled={saving || loading}
-              className="h-9 px-5 w-[108px] shadow-md border border-primary/40"
+              className="h-9 px-5 w-[108px] rounded-xl"
             >
               {saving ? (
                 "Saving..."
@@ -507,34 +507,26 @@ function ToolPlaygroundInner({
             <div className="w-full h-full">
               <div className="h-full">
                 <div className={embedded ? "h-full" : "h-full"}>
-                  {loading && steps.length === 0 && !instructions ? (
-                    <div className="flex items-center justify-center py-20">
-                      <div className="flex flex-col items-center gap-3">
-                        <Loader2 className="h-8 w-8 animate-spin text-foreground" />
-                      </div>
-                    </div>
-                  ) : (
-                    <ToolStepGallery
-                      onStepEdit={handleStepEdit}
-                      onExecuteStep={handleExecuteStep}
-                      onExecuteStepWithLimit={handleExecuteStepWithLimit}
-                      onExecuteTransform={handleExecuteTransform}
-                      onAbort={currentRunId ? handleStopExecution : undefined}
-                      onFilesUpload={handleFilesUpload}
-                      onFileRemove={handleFileRemove}
-                      toolActionButtons={toolActionButtons}
-                      headerActions={
-                        headerActions !== undefined ? headerActions : defaultHeaderActions
-                      }
-                      navigateToFinalSignal={navigateToFinalSignal}
-                      showStepOutputSignal={showStepOutputSignal}
-                      focusStepId={focusStepId}
-                      isProcessingFiles={isProcessingFiles}
-                      totalFileSize={totalFileSize}
-                      isPayloadValid={isPayloadValid}
-                      embedded={embedded}
-                    />
-                  )}
+                  <ToolStepGallery
+                    onStepEdit={handleStepEdit}
+                    onExecuteStep={handleExecuteStep}
+                    onExecuteStepWithLimit={handleExecuteStepWithLimit}
+                    onExecuteTransform={handleExecuteTransform}
+                    onAbort={currentRunId ? handleStopExecution : undefined}
+                    onFilesUpload={handleFilesUpload}
+                    onFileRemove={handleFileRemove}
+                    toolActionButtons={toolActionButtons}
+                    headerActions={
+                      headerActions !== undefined ? headerActions : defaultHeaderActions
+                    }
+                    navigateToFinalSignal={navigateToFinalSignal}
+                    showStepOutputSignal={showStepOutputSignal}
+                    focusStepId={focusStepId}
+                    isProcessingFiles={isProcessingFiles}
+                    totalFileSize={totalFileSize}
+                    isPayloadValid={isPayloadValid}
+                    embedded={embedded}
+                  />
                 </div>
               </div>
             </div>

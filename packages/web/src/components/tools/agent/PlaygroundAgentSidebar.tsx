@@ -253,113 +253,126 @@ function PlaygroundAgentContent({
           {messages
             .filter((m) => !(m as any).isHidden)
             .map((message) => (
-              <div key={message.id} className="space-y-1 group">
-                <div className="flex items-center gap-2">
-                  <div
-                    className={cn(
-                      "flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center",
-                      message.role === "user"
-                        ? "bg-primary text-primary-foreground"
-                        : "bg-muted text-muted-foreground",
-                    )}
-                  >
-                    {message.role === "user" ? <User size={14} /> : <BotMessageSquare size={14} />}
-                  </div>
-                  <span className="text-sm font-medium">
-                    {message.role === "user" ? "You" : "superglue"}
-                  </span>
-                  <span className="text-xs text-muted-foreground">
-                    {formatTimestamp(message.timestamp)}
-                  </span>
-                  {(() => {
-                    const hasContent =
-                      message.content?.trim() ||
-                      message.parts?.some((p) => p.type === "content" && p.content?.trim());
-                    return message.isStreaming && !hasContent ? <ThinkingIndicator /> : null;
-                  })()}
-                  {message.role === "user" && !isLoading && (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="opacity-0 group-hover:opacity-100 transition-opacity h-5 w-5 p-3"
-                      onClick={() => handleEditMessage(message.id, message.content)}
+              <div key={message.id} className="p-2 pt-3 rounded-xl group min-h-12">
+                <div className="space-y-2 min-w-0 overflow-hidden">
+                  <div className="flex items-center gap-2">
+                    <div
+                      className={cn(
+                        "flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center",
+                        message.role === "user"
+                          ? "bg-neutral-100 dark:bg-neutral-900"
+                          : "bg-white dark:bg-black",
+                      )}
                     >
-                      <Edit2 className="w-0.5 h-0.5" />
-                    </Button>
+                      {message.role === "user" ? (
+                        <span className="text-[9px] font-semibold text-neutral-900 dark:text-neutral-100">
+                          Y
+                        </span>
+                      ) : (
+                        <img
+                          src="/favicon.png"
+                          alt="superglue"
+                          className="w-3 h-3 object-contain dark:invert"
+                        />
+                      )}
+                    </div>
+                    <span className="font-medium text-sm">
+                      {message.role === "user" ? "You" : "superglue"}
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      {formatTimestamp(message.timestamp)}
+                    </span>
+                    {(() => {
+                      const hasContent =
+                        message.content?.trim() ||
+                        message.parts?.some((p) => p.type === "content" && p.content?.trim());
+                      return message.isStreaming && !hasContent ? <ThinkingIndicator /> : null;
+                    })()}
+                    {message.role === "user" && !isLoading && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleEditMessage(message.id, message.content)}
+                        className="opacity-0 group-hover:opacity-100 transition-opacity h-6 px-2 flex items-center justify-center rounded hover:bg-muted"
+                        title="Edit message"
+                      >
+                        <Edit2 className="w-3 h-3" />
+                      </Button>
+                    )}
+                  </div>
+                  {editingMessageId === message.id ? (
+                    <div className="space-y-2">
+                      <Textarea
+                        value={editingContent}
+                        onChange={(e) => setEditingContent(e.target.value)}
+                        className="min-h-[60px] text-sm"
+                        autoFocus
+                      />
+                      <div className="flex gap-2">
+                        <Button
+                          size="sm"
+                          onClick={() => handleSaveEdit(message.id)}
+                          disabled={isLoading}
+                        >
+                          Save & Restart
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={handleCancelEdit}
+                          disabled={isLoading}
+                        >
+                          <X className="w-3 h-3 mr-1" />
+                          Cancel
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {message.parts && message.parts.length > 0 ? (
+                        groupMessageParts(message.parts).map((grouped, idx) => {
+                          if (grouped.type === "content") {
+                            return (
+                              <div
+                                key={grouped.part.id}
+                                className={cn(
+                                  "prose prose-sm max-w-none dark:prose-invert text-sm",
+                                  message.isStreaming && "streaming-message",
+                                )}
+                              >
+                                <Streamdown>{grouped.part.content || ""}</Streamdown>
+                              </div>
+                            );
+                          } else if (grouped.type === "background_tools") {
+                            return <BackgroundToolGroup key={`bg-${idx}`} tools={grouped.tools} />;
+                          } else if (grouped.type === "tool" && grouped.part.tool) {
+                            return (
+                              <ToolCallComponent
+                                key={grouped.part.tool.id}
+                                tool={grouped.part.tool}
+                                onInputChange={handleToolInputChange}
+                                onToolUpdate={handleToolUpdate}
+                                sendAgentRequest={sendAgentRequest}
+                                bufferAction={bufferAction}
+                                onAbortStream={stopStreaming}
+                                onApplyChanges={onApplyChanges}
+                                onApplyPayload={onApplyPayload}
+                                currentPayload={currentPayload}
+                                isPlayground={mode === "tool"}
+                              />
+                            );
+                          }
+                          return null;
+                        })
+                      ) : (
+                        <div className="prose prose-sm max-w-none dark:prose-invert text-sm">
+                          <Streamdown>{message.content}</Streamdown>
+                        </div>
+                      )}
+                    </div>
                   )}
                 </div>
-
-                {editingMessageId === message.id ? (
-                  <div className="space-y-2">
-                    <Textarea
-                      value={editingContent}
-                      onChange={(e) => setEditingContent(e.target.value)}
-                      className="min-h-[48px] max-h-[120px] resize-none text-sm focus-visible:ring-0 focus-visible:border-ring"
-                      autoFocus
-                    />
-                    <div className="flex gap-2">
-                      <Button
-                        size="sm"
-                        onClick={() => handleSaveEdit(message.id)}
-                        disabled={!editingContent.trim() || isLoading}
-                      >
-                        Save & Restart
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={handleCancelEdit}
-                        disabled={isLoading}
-                      >
-                        <X className="w-3 h-3 mr-1" />
-                        Cancel
-                      </Button>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    {message.parts && message.parts.length > 0 ? (
-                      groupMessageParts(message.parts).map((grouped, idx) => {
-                        if (grouped.type === "content") {
-                          return (
-                            <div
-                              key={grouped.part.id}
-                              className={cn(
-                                "prose prose-sm max-w-none dark:prose-invert text-sm",
-                                message.isStreaming && "streaming-message",
-                              )}
-                            >
-                              <Streamdown>{grouped.part.content || ""}</Streamdown>
-                            </div>
-                          );
-                        } else if (grouped.type === "background_tools") {
-                          return <BackgroundToolGroup key={`bg-${idx}`} tools={grouped.tools} />;
-                        } else if (grouped.type === "tool" && grouped.part.tool) {
-                          return (
-                            <ToolCallComponent
-                              key={grouped.part.tool.id}
-                              tool={grouped.part.tool}
-                              onInputChange={handleToolInputChange}
-                              onToolUpdate={handleToolUpdate}
-                              sendAgentRequest={sendAgentRequest}
-                              bufferAction={bufferAction}
-                              onAbortStream={stopStreaming}
-                              onApplyChanges={onApplyChanges}
-                              onApplyPayload={onApplyPayload}
-                              currentPayload={currentPayload}
-                              isPlayground={mode === "tool"}
-                            />
-                          );
-                        }
-                        return null;
-                      })
-                    ) : (
-                      <div className="prose prose-sm max-w-none dark:prose-invert text-sm">
-                        <Streamdown>{message.content}</Streamdown>
-                      </div>
-                    )}
-                  </div>
-                )}
               </div>
             ))}
         </div>
@@ -379,7 +392,6 @@ function PlaygroundAgentContent({
             onChange={(e) => {
               setInputValue(e.target.value);
               setIsHighlighted(false);
-              // Auto-resize textarea
               e.target.style.height = "auto";
               e.target.style.height = `${Math.min(e.target.scrollHeight, 200)}px`;
             }}
@@ -387,6 +399,9 @@ function PlaygroundAgentContent({
             placeholder="Message superglue..."
             className={cn(
               "min-h-[36px] max-h-[200px] resize-none text-sm py-2 transition-all",
+              "bg-gradient-to-br from-muted/50 to-muted/30 dark:from-muted/50 dark:to-muted/30",
+              "backdrop-blur-sm border-border/50 dark:border-border/70 shadow-sm",
+              "focus:border-border/60 dark:focus:border-border/90",
               isHighlighted &&
                 "ring-1 ring-amber-500 border-amber-500 shadow-lg shadow-amber-500/30 focus-visible:ring-1 focus-visible:ring-amber-500",
             )}

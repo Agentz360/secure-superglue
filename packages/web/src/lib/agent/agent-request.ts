@@ -13,7 +13,7 @@ import {
   ToolExecutionFeedback,
   FileUploadAction,
 } from "./agent-types";
-import { TOOL_POLICY_PROCESSORS, processToolPolicy } from "./registry/tool-policies";
+import { TOOL_POLICIES, getEffectiveMode } from "./registry/tool-policies";
 
 function validateUserActions(actions: any[]): void {
   for (const action of actions) {
@@ -105,8 +105,9 @@ export function validateAgentRequest(body: any): ValidatedAgentRequest {
   };
 }
 
-function isNewConversation(messages: Message[]): boolean {
-  return messages.length === 1 && messages[0].role === "user";
+function needsSystemMessage(messages: Message[]): boolean {
+  // New conversation = no system message has been injected yet
+  return !messages.some((m) => m.role === "system");
 }
 
 type ToolStatus =
@@ -395,9 +396,7 @@ export async function prepareMessages(
 ): Promise<Message[]> {
   let messages = [...request.messages];
 
-  const isNew = isNewConversation(messages);
-
-  if (isNew) {
+  if (needsSystemMessage(messages)) {
     const systemPrompt = resolveSystemPrompt(request.agent, request.agentParams);
     const dateMessage = getDateMessage();
     const initialContext = await generateAgentInitialContext(
@@ -642,9 +641,10 @@ export function buildToolsForAISDK(
       inputSchema: jsonSchema(schema),
     };
 
-    const hasPolicyProcessor = TOOL_POLICY_PROCESSORS[entry.name] !== undefined;
+    const policy = TOOL_POLICIES[entry.name];
+    const hasPolicy = policy !== undefined;
     const shouldAutoExecute =
-      entry.execute && (entry.confirmation?.timing !== "before" || hasPolicyProcessor);
+      entry.execute && (entry.confirmation?.timing !== "before" || hasPolicy);
 
     if (shouldAutoExecute) {
       toolDef.execute = async function* (input: any) {

@@ -1,4 +1,5 @@
 import { setFileUploadDocumentationURL } from "@/src/lib/file-utils";
+import { resolveOAuthConfig } from "@/src/lib/oauth-utils";
 import { splitUrl } from "@/src/lib/client-utils";
 import { ConfirmationAction, ToolResult, UpsertMode } from "@superglue/shared";
 import { SystemConfig, systems, findTemplateForSystem } from "@superglue/shared/templates";
@@ -8,7 +9,7 @@ import {
   resolveDocumentationFiles,
   resolvePayloadWithFiles,
   stripLegacyToolFields,
-  truncateResponseBody,
+  truncateResponseData,
   validateDraftOrToolId,
   validateRequiredFields,
   getProtocol,
@@ -544,15 +545,7 @@ const createSystemDefinition = (): ToolDefinition => ({
       - Providing a documentationUrl will trigger asynchronous API documentation processing.
       - For documentation field, you can provide raw documentation text OR use file::filename to reference uploaded files.
       - When users mention API constraints (rate limits, special endpoints, auth requirements, etc.), capture them in 'specificInstructions'.
-    </important_notes>
-    
-    <credential_handling>
-      - Use 'credentials' for NON-SENSITIVE config: client_id, auth_url, token_url, scopes, grant_type, redirect_uri
-      - Use 'sensitiveCredentials' for SECRETS that require user input: { api_key: true, client_secret: true }
-      - When sensitiveCredentials is set, a secure UI appears for users to enter the actual values
-      - NEVER ask users to paste secrets in chat - always use sensitiveCredentials instead
-      - Example: For API key auth, use sensitiveCredentials: { api_key: true }
-    </credential_handling>`,
+    </important_notes>`,
   inputSchema: {
     type: "object",
     properties: {
@@ -596,13 +589,7 @@ const createSystemDefinition = (): ToolDefinition => ({
       },
       credentials: {
         type: "object",
-        description:
-          "Non-sensitive credentials only: client_id, auth_url, token_url, scopes, grant_type, redirect_uri. Do NOT include secrets here.",
-      },
-      sensitiveCredentials: {
-        type: "object",
-        description:
-          "Sensitive credentials requiring secure user input. Set field to true to request it. Example: { api_key: true, client_secret: true }. A secure UI will appear for users to enter values.",
+        description: "Credentials for the system including API keys, OAuth config, etc.",
       },
       metadata: {
         type: "object",
@@ -615,7 +602,7 @@ const createSystemDefinition = (): ToolDefinition => ({
 });
 
 const runCreateSystem = async (input: any, ctx: ToolExecutionContext) => {
-  let { templateId, sensitiveCredentials, ...systemInput } = input;
+  let { templateId, ...systemInput } = input;
 
   if (templateId) {
     const template = systems[templateId];
@@ -678,14 +665,6 @@ const runCreateSystem = async (input: any, ctx: ToolExecutionContext) => {
   }
   if (docResult.documentationUrl) {
     systemInput.documentationUrl = docResult.documentationUrl;
-  }
-
-  if (sensitiveCredentials && Object.keys(sensitiveCredentials).length > 0) {
-    return {
-      confirmationState: SYSTEM_UPSERT_CONFIRMATION.PENDING,
-      systemConfig: systemInput,
-      requiredSensitiveFields: Object.keys(sensitiveCredentials),
-    };
   }
 
   try {
@@ -797,16 +776,7 @@ const editSystemDefinition = (): ToolDefinition => ({
       - Files persist for the entire conversation session (until page refresh or new conversation)
       - When providing files as system documentation input, the files you use will overwrite the current documentation content. Ensure to include ALL required files always, even if the user only asks you to add one.
       - If you provide documentationUrl, include relevant keywords in 'documentationKeywords' to improve documentation search (e.g., endpoint names, data objects, key concepts mentioned in conversation).
-    </important_notes>
-
-    <credential_handling>
-      - Use 'credentials' for NON-SENSITIVE config: client_id, auth_url, token_url, scopes, grant_type, redirect_uri
-      - Use 'sensitiveCredentials' for SECRETS that require user input: { api_key: true, client_secret: true }
-      - When sensitiveCredentials is set, a secure UI appears for users to enter the actual values
-      - NEVER ask users to paste secrets in chat - always use sensitiveCredentials instead
-      - Sensitive credential values you see (like <<masked_api_key>>) are placeholders, not real values
-    </credential_handling>
-    `,
+    </important_notes>`,
   inputSchema: {
     type: "object",
     properties: {
@@ -831,13 +801,7 @@ const editSystemDefinition = (): ToolDefinition => ({
       },
       credentials: {
         type: "object",
-        description:
-          "Non-sensitive credentials only: client_id, auth_url, token_url, scopes, grant_type, redirect_uri. Do NOT include secrets here.",
-      },
-      sensitiveCredentials: {
-        type: "object",
-        description:
-          "Sensitive credentials requiring secure user input. Set field to true to request it. Example: { api_key: true }. A secure UI will appear for users to enter values.",
+        description: "Credentials for the system including API keys, OAuth config, etc.",
       },
     },
     required: ["id"],
@@ -845,7 +809,7 @@ const editSystemDefinition = (): ToolDefinition => ({
 });
 
 const runEditSystem = async (input: any, ctx: ToolExecutionContext) => {
-  let { sensitiveCredentials, ...systemInput } = input;
+  const systemInput = { ...input };
 
   const docResult = resolveDocumentationFiles(
     systemInput.documentation,
@@ -865,14 +829,6 @@ const runEditSystem = async (input: any, ctx: ToolExecutionContext) => {
   }
   if (docResult.documentationUrl) {
     systemInput.documentationUrl = docResult.documentationUrl;
-  }
-
-  if (sensitiveCredentials && Object.keys(sensitiveCredentials).length > 0) {
-    return {
-      confirmationState: SYSTEM_UPSERT_CONFIRMATION.PENDING,
-      systemConfig: systemInput,
-      requiredSensitiveFields: Object.keys(sensitiveCredentials),
-    };
   }
 
   try {
@@ -991,7 +947,11 @@ const callSystemDefinition = (): ToolDefinition => ({
 
     <http_usage>
       - Supports all HTTP methods: GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS
-      - Example header with credentials: { "Authorization": "Bearer <<stripe_api_api_key>>" }
+      - CRITICAL: For authenticated APIs, you MUST include the Authorization header with credential placeholders
+      - Example: headers: { "Authorization": "Bearer <<systemId_access_token>>" }
+      - OAuth systems typically use: headers: { "Authorization": "Bearer <<systemId_access_token>>" }
+      - API key systems typically use: headers: { "Authorization": "Bearer <<systemId_api_key>>" } or headers: { "X-API-Key": "<<systemId_api_key>>" }
+      - Credentials are NOT auto-injected into headers - you MUST explicitly include them
     </http_usage>
 
     <postgres_usage>
@@ -1027,7 +987,7 @@ const callSystemDefinition = (): ToolDefinition => ({
       headers: {
         type: "object",
         description:
-          "Optional HTTP headers (only used for HTTP/HTTPS URLs). Can use <<system_id_credential_key>> for credential injection.",
+          'REQUIRED for authenticated HTTP APIs. Must include Authorization header with credential placeholders like { "Authorization": "Bearer <<systemId_access_token>>" }. Credentials are NOT auto-injected - you must explicitly include them here.',
       },
       body: {
         type: "string",
@@ -1069,12 +1029,12 @@ const runCallSystem = async (
       payload: {},
     });
 
-    return {
+    return truncateResponseData({
       success: result.success,
       protocol,
       data: result.data,
       error: result.error,
-    };
+    });
   } catch (error) {
     return {
       success: false,
@@ -1103,7 +1063,7 @@ const processCallSystemConfirmation = async (
   if (parsedOutput.confirmationState === CALL_SYSTEM_CONFIRMATION.CONFIRMED) {
     try {
       const realResult = await runCallSystem(input, ctx);
-      return { output: JSON.stringify(truncateResponseBody(realResult)), status: "completed" };
+      return { output: JSON.stringify(truncateResponseData(realResult)), status: "completed" };
     } catch (error: any) {
       const errorResult = {
         success: false,
@@ -1209,7 +1169,7 @@ const authenticateOAuthDefinition = (): ToolDefinition => ({
 
     <credential_resolution>
       OAuth credentials are resolved in this priority order:
-      1. Values passed to this tool (client_id, auth_url, token_url) or via sensitiveCredentials (client_secret)
+      1. Values passed to this tool (client_id, client_secret, auth_url, token_url)
       2. Values already stored in the system's credentials
       3. Values from templates (slack, salesforce, asana, notion, airtable, jira, confluence)
       
@@ -1228,19 +1188,6 @@ const authenticateOAuthDefinition = (): ToolDefinition => ({
       - confluence: auth_url=https://auth.atlassian.com/authorize, token_url=https://auth.atlassian.com/oauth/token
     </templates_with_preconfigured_oauth>
 
-    <first_time_setup>
-      For FIRST-TIME setup on Google, Microsoft, GitHub, etc. (when credentials are NOT already stored):
-      1. Provide client_id directly (non-sensitive)
-      2. Use sensitiveCredentials: { client_secret: true } to request the secret via secure UI
-      3. Provide the correct auth_url and token_url and other configuration options
-    </first_time_setup>
-
-    <credential_handling>
-      - client_id, auth_url, token_url, scopes, grant_type are NON-SENSITIVE - pass directly
-      - client_secret is SENSITIVE - use sensitiveCredentials: { client_secret: true }
-      - NEVER ask users to paste client_secret in chat - use sensitiveCredentials instead
-    </credential_handling>
-
     <important>
       - STOP the conversation after calling - user must complete OAuth in UI
       - client_credentials flow only requires client_id, client_secret, scopes and token_url
@@ -1258,7 +1205,12 @@ const authenticateOAuthDefinition = (): ToolDefinition => ({
       client_id: {
         type: "string",
         description:
-          "OAuth client ID (non-sensitive) - only needed if not already stored in system credentials or template",
+          "OAuth client ID - only needed if not already stored in system credentials or template",
+      },
+      client_secret: {
+        type: "string",
+        description:
+          "OAuth client secret - only needed if not already stored in system credentials or template",
       },
       auth_url: {
         type: "string",
@@ -1296,104 +1248,24 @@ const authenticateOAuthDefinition = (): ToolDefinition => ({
         description:
           "Additional headers for token requests, e.g., {'Notion-Version': '2022-06-28'}",
       },
-      sensitiveCredentials: {
-        type: "object",
-        description:
-          "Sensitive OAuth credentials requiring secure user input. Set { client_secret: true } if user needs to provide it. A secure UI will appear for users to enter the value.",
-      },
     },
     required: ["systemId", "scopes"],
   },
 });
 
 const runAuthenticateOAuth = async (input: any, ctx: ToolExecutionContext) => {
-  const {
-    systemId,
-    scopes,
-    client_id,
-    auth_url,
-    token_url,
-    grant_type,
-    tokenAuthMethod,
-    tokenContentType,
-    usePKCE,
-    extraHeaders,
-    sensitiveCredentials,
-  } = input;
-
   try {
-    const system = await ctx.superglueClient.getSystem(systemId);
+    const system = await ctx.superglueClient.getSystem(input.systemId);
     if (!system) {
       return {
         success: false,
-        error: `System '${systemId}' not found`,
+        error: `System '${input.systemId}' not found`,
         suggestion: "Create the system first using create_system",
       };
     }
 
-    const templateMatch = findTemplateForSystem(system);
-    const templateOAuth = templateMatch?.template.oauth;
-
-    const oauthConfig: Record<string, any> = {
-      grant_type:
-        grant_type ||
-        system.credentials?.grant_type ||
-        templateOAuth?.grant_type ||
-        "authorization_code",
-    };
-
-    if (scopes) oauthConfig.scopes = scopes;
-    else if (system.credentials?.scopes) oauthConfig.scopes = system.credentials.scopes;
-    else if (templateOAuth?.scopes) oauthConfig.scopes = templateOAuth.scopes;
-
-    if (client_id) oauthConfig.client_id = client_id;
-    else if (system.credentials?.client_id) oauthConfig.client_id = system.credentials.client_id;
-    else if (templateOAuth?.client_id) oauthConfig.client_id = templateOAuth.client_id;
-
-    if (system.credentials?.client_secret) {
-      oauthConfig.client_secret = system.credentials.client_secret;
-    }
-
-    if (auth_url) oauthConfig.auth_url = auth_url;
-    else if (system.credentials?.auth_url) oauthConfig.auth_url = system.credentials.auth_url;
-    else if (templateOAuth?.authUrl) oauthConfig.auth_url = templateOAuth.authUrl;
-
-    if (token_url) oauthConfig.token_url = token_url;
-    else if (system.credentials?.token_url) oauthConfig.token_url = system.credentials.token_url;
-    else if (templateOAuth?.tokenUrl) oauthConfig.token_url = templateOAuth.tokenUrl;
-
-    // Token exchange configuration - agent input > system credentials > template
-    if (tokenAuthMethod) oauthConfig.tokenAuthMethod = tokenAuthMethod;
-    else if (system.credentials?.tokenAuthMethod)
-      oauthConfig.tokenAuthMethod = system.credentials.tokenAuthMethod;
-    else if (templateOAuth?.tokenAuthMethod)
-      oauthConfig.tokenAuthMethod = templateOAuth.tokenAuthMethod;
-
-    if (tokenContentType) oauthConfig.tokenContentType = tokenContentType;
-    else if (system.credentials?.tokenContentType)
-      oauthConfig.tokenContentType = system.credentials.tokenContentType;
-    else if (templateOAuth?.tokenContentType)
-      oauthConfig.tokenContentType = templateOAuth.tokenContentType;
-
-    if (usePKCE !== undefined) oauthConfig.usePKCE = usePKCE;
-    else if (system.credentials?.usePKCE !== undefined)
-      oauthConfig.usePKCE = system.credentials.usePKCE;
-    else if (templateOAuth?.usePKCE) oauthConfig.usePKCE = templateOAuth.usePKCE;
-
-    if (extraHeaders) oauthConfig.extraHeaders = extraHeaders;
-    else if (system.credentials?.extraHeaders) {
-      // Parse if stored as JSON string
-      if (typeof system.credentials.extraHeaders === "string") {
-        try {
-          oauthConfig.extraHeaders = JSON.parse(system.credentials.extraHeaders);
-        } catch {
-          // Malformed JSON in stored extraHeaders - skip rather than crash
-          console.warn("Failed to parse extraHeaders from credentials, ignoring malformed value");
-        }
-      } else {
-        oauthConfig.extraHeaders = system.credentials.extraHeaders;
-      }
-    } else if (templateOAuth?.extraHeaders) oauthConfig.extraHeaders = templateOAuth.extraHeaders;
+    const templateOAuth = findTemplateForSystem(system)?.template.oauth;
+    const oauthConfig = resolveOAuthConfig(input, system.credentials, templateOAuth);
 
     if (!oauthConfig.client_id) {
       return {
@@ -1411,24 +1283,15 @@ const runAuthenticateOAuth = async (input: any, ctx: ToolExecutionContext) => {
       };
     }
 
-    if (sensitiveCredentials && Object.keys(sensitiveCredentials).length > 0) {
-      return {
-        confirmationState: SYSTEM_UPSERT_CONFIRMATION.PENDING,
-        systemId,
-        oauthConfig,
-        system: filterSystemFields(system),
-        requiredSensitiveFields: Object.keys(sensitiveCredentials),
-      };
-    }
+    const { client_secret: _secret, ...safeOauthConfig } = oauthConfig;
 
     return {
       success: true,
       requiresOAuth: true,
-      systemId,
-      oauthConfig,
+      systemId: input.systemId,
+      oauthConfig: safeOauthConfig,
       system: filterSystemFields(system),
       message: "OAuth authentication ready. Click the button to authenticate.",
-      note: "STOP the conversation here and wait for the user to complete OAuth authentication.",
     };
   } catch (error: any) {
     return {
@@ -1451,12 +1314,39 @@ const processAuthenticateOAuthConfirmation = async (
     return { output: JSON.stringify(output), status: "completed" };
   }
 
+  if (parsedOutput.success === false && parsedOutput.error) {
+    return { output: JSON.stringify(parsedOutput), status: "completed" };
+  }
   if (!parsedOutput.confirmationState) {
     return { output: JSON.stringify(parsedOutput), status: "completed" };
   }
 
-  if (parsedOutput.confirmationState === SYSTEM_UPSERT_CONFIRMATION.CONFIRMED) {
-    const confirmationData = parsedOutput.confirmationData || parsedOutput;
+  if (parsedOutput.confirmationState === "declined") {
+    return {
+      output: JSON.stringify({
+        success: false,
+        cancelled: true,
+        message: "OAuth authentication cancelled by user",
+      }),
+      status: "declined",
+    };
+  }
+
+  if (parsedOutput.confirmationState === "oauth_failure") {
+    const confirmationData = parsedOutput.confirmationData || {};
+    return {
+      output: JSON.stringify({
+        success: false,
+        error: confirmationData.error || "OAuth authentication failed",
+        systemId: confirmationData.systemId,
+      }),
+      status: "completed",
+    };
+  }
+
+  if (parsedOutput.confirmationState === "oauth_success") {
+    const confirmationData = parsedOutput.confirmationData || {};
+    const { tokens } = confirmationData;
     const systemId = confirmationData.systemId || parsedOutput.systemId;
     const oauthConfig = confirmationData.oauthConfig || parsedOutput.oauthConfig;
     const userProvidedCredentials =
@@ -1467,26 +1357,42 @@ const processAuthenticateOAuthConfirmation = async (
       ...userProvidedCredentials,
     };
 
-    return {
-      output: JSON.stringify({
-        success: true,
-        requiresOAuth: true,
-        systemId,
-        oauthConfig: finalOAuthConfig,
-        message: "OAuth authentication ready. Click the button to authenticate.",
-        note: "STOP the conversation here and wait for the user to complete OAuth authentication.",
-      }),
-      status: "completed",
-    };
-  } else if (parsedOutput.confirmationState === SYSTEM_UPSERT_CONFIRMATION.DECLINED) {
-    return {
-      output: JSON.stringify({
-        success: false,
-        cancelled: true,
-        message: "OAuth authentication cancelled by user",
-      }),
-      status: "declined",
-    };
+    try {
+      const currentSystem = await ctx.superglueClient.getSystem(systemId);
+      const { extraHeaders, ...restOauthConfig } = oauthConfig;
+      const updatedCredentials = {
+        ...currentSystem?.credentials,
+        ...restOauthConfig,
+        ...(extraHeaders && {
+          extraHeaders:
+            typeof extraHeaders === "string" ? extraHeaders : JSON.stringify(extraHeaders),
+        }),
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        token_type: tokens.token_type,
+        expires_at: tokens.expires_at,
+      };
+
+      await ctx.superglueClient.upsertSystem(systemId, { credentials: updatedCredentials });
+
+      return {
+        output: JSON.stringify({
+          success: true,
+          systemId,
+          message: "OAuth authentication completed and credentials saved to system.",
+        }),
+        status: "completed",
+      };
+    } catch (error: any) {
+      return {
+        output: JSON.stringify({
+          success: false,
+          error: `OAuth succeeded but failed to save credentials: ${error.message}`,
+          suggestion: "Try calling authenticate_oauth again.",
+        }),
+        status: "completed",
+      };
+    }
   }
 
   return { output: JSON.stringify(parsedOutput), status: "completed" };
@@ -1914,11 +1820,15 @@ export const TOOL_REGISTRY: Record<string, ToolRegistryEntry> = {
     name: "call_system",
     definition: callSystemDefinition,
     execute: async (input: any, ctx: ToolExecutionContext) => {
-      const { shouldAutoExecute } = processToolPolicy("call_system", input, ctx);
+      const { shouldAutoExecute } = processToolPolicy(
+        "call_system",
+        input,
+        ctx.toolExecutionPolicies,
+      );
 
       if (shouldAutoExecute) {
         const result = await runCallSystem(input, ctx);
-        return truncateResponseBody(result);
+        return truncateResponseData(result);
       }
 
       return {
