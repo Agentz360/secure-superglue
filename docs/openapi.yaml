@@ -191,6 +191,69 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /runs:
+    get:
+      summary: List runs
+      operationId: listRuns
+      tags:
+        - Runs
+      parameters:
+        - name: toolId
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [running, success, failed, aborted]
+        - name: requestSources
+          in: query
+          description: Filter by request sources (comma-separated for multiple values)
+          schema:
+            type: string
+          example: "api,webhook"
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 100
+      responses:
+        "200":
+          description: List of runs
+          headers:
+            X-Trace-Id:
+              schema:
+                type: string
+              description: Request trace ID for debugging and log correlation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Run"
+                  page:
+                    type: integer
+                    example: 1
+                  limit:
+                    type: integer
+                    example: 50
+                  total:
+                    type: integer
+                    example: 327
+                  hasMore:
+                    type: boolean
+                    example: true
+
   /runs/{runId}:
     get:
       summary: Get run status
@@ -253,141 +316,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-
-  /hooks/{toolId}:
-    post:
-      summary: Handle incoming webhook
-      operationId: triggerWebhook
-      tags:
-        - Webhooks
-      description: |
-        **Enterprise feature.**
-
-        Trigger a tool execution from an external webhook (Stripe, GitHub, etc.).
-
-        The request body becomes the tool's input payload.
-        Returns 202 Accepted immediately and executes the tool asynchronously.
-      parameters:
-        - name: toolId
-          in: path
-          required: true
-          schema:
-            type: string
-          description: ID of the tool to trigger
-          example: handle-stripe-webhook
-      requestBody:
-        required: false
-        description: Webhook payload from the external service. Becomes the tool's input.
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: true
-              example:
-                id: evt_1234
-                type: customer.created
-                data:
-                  object:
-                    id: cus_abc123
-                    email: user@example.com
-      responses:
-        "202":
-          description: Webhook accepted, tool execution started
-          headers:
-            X-Trace-Id:
-              schema:
-                type: string
-              description: Trace ID for this request
-          content:
-            application/json:
-              schema:
-                type: object
-                required:
-                  - runId
-                  - status
-                  - toolId
-                properties:
-                  runId:
-                    type: string
-                    description: ID of the created run
-                    example: 7f3e9c1a-2b4d-4e8f-9a3b-1c5d7e9f2a4b
-                  status:
-                    type: string
-                    enum: [accepted]
-                    example: accepted
-                  toolId:
-                    type: string
-                    description: ID of the triggered tool
-                    example: handle-stripe-webhook
-        "400":
-          description: Tool is archived
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "404":
-          description: Tool not found
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-
-  /runs:
-    get:
-      summary: List runs
-      operationId: listRuns
-      tags:
-        - Runs
-      parameters:
-        - name: toolId
-          in: query
-          schema:
-            type: string
-        - name: status
-          in: query
-          schema:
-            type: string
-            enum: [running, success, failed, aborted]
-        - name: page
-          in: query
-          schema:
-            type: integer
-            default: 1
-        - name: limit
-          in: query
-          schema:
-            type: integer
-            default: 50
-            maximum: 100
-      responses:
-        "200":
-          description: List of runs
-          headers:
-            X-Trace-Id:
-              schema:
-                type: string
-              description: Request trace ID for debugging and log correlation
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  data:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/Run"
-                  page:
-                    type: integer
-                    example: 1
-                  limit:
-                    type: integer
-                    example: 50
-                  total:
-                    type: integer
-                    example: 327
-                  hasMore:
-                    type: boolean
-                    example: true
 
 components:
   securitySchemes:
@@ -454,10 +382,19 @@ components:
             JavaScript function for final output transformation.
             Format: (sourceData) => expression
           example: "(sourceData) => sourceData.map(item => ({ id: item.id, title: item.name }))"
+        folder:
+          type: string
+          description: Folder path for organizing tools
+          example: "integrations/payments"
         archived:
           type: boolean
           description: Whether this tool is archived (if so, it will not be listed in the UI and cannot be run)
           default: false
+        responseFilters:
+          type: array
+          description: Filters to apply to the response data
+          items:
+            $ref: "#/components/schemas/ResponseFilter"
         createdAt:
           type: string
           format: date-time
@@ -465,23 +402,94 @@ components:
           type: string
           format: date-time
 
+    ResponseFilter:
+      type: object
+      description: Filter configuration for response data
+      required:
+        - id
+        - enabled
+        - target
+        - pattern
+        - action
+      properties:
+        id:
+          type: string
+          description: Unique identifier for this filter
+        name:
+          type: string
+          description: Human-readable name for this filter
+        enabled:
+          type: boolean
+          description: Whether this filter is active
+        target:
+          type: string
+          enum: [KEYS, VALUES, BOTH]
+          description: What to match against (keys, values, or both)
+        pattern:
+          type: string
+          description: Regex pattern to match
+        action:
+          type: string
+          enum: [REMOVE, MASK, FAIL]
+          description: Action to take when pattern matches
+        maskValue:
+          type: string
+          description: Value to use when masking (only for MASK action)
+        scope:
+          type: string
+          enum: [FIELD, ITEM, ENTRY]
+          description: Scope of removal (only for REMOVE and MASK actions)
+
     ToolStep:
       type: object
       description: |
-        A single execution step. Protocol is detected from URL scheme:
-        - HTTP/HTTPS: Standard REST API calls with query params, headers, body
-        - Postgres: postgres:// or postgresql:// URLs, body contains SQL query
-        - FTP/SFTP: ftp://, ftps://, or sftp:// URLs, body contains operation details
+        A single execution step containing either a request configuration (API call)
+        or a transform configuration (data transformation).
       required:
         - id
-        - url
-        - method
-        - systemId
+        - config
       properties:
         id:
           type: string
           description: Unique identifier for this step
           example: 1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d
+        config:
+          $ref: "#/components/schemas/StepConfig"
+        instruction:
+          type: string
+          description: Human-readable instruction describing what this step does
+          example: Fetch user details from the API
+        modify:
+          type: boolean
+          description: Whether this step modifies data on the system it operates on
+          default: false
+        dataSelector:
+          type: string
+          description: |
+            JavaScript function to select data for loop execution.
+            Format: (sourceData) => expression
+          example: "(sourceData) => sourceData.data.items"
+        failureBehavior:
+          type: string
+          enum: [fail, continue]
+          description: How to handle step failures (fail stops execution, continue proceeds to next step)
+          default: fail
+
+    RequestStepConfig:
+      type: object
+      description: |
+        Configuration for a request step. Protocol is detected from URL scheme:
+        - HTTP/HTTPS: Standard REST API calls with query params, headers, body
+        - Postgres: postgres:// or postgresql:// URLs, body contains SQL query
+        - FTP/SFTP: ftp://, ftps://, or sftp:// URLs, body contains operation details
+      required:
+        - url
+        - method
+      properties:
+        type:
+          type: string
+          enum: [request]
+          description: Optional type discriminator (defaults to request)
         url:
           type: string
           description: |
@@ -532,25 +540,37 @@ components:
           type: string
           description: System to use for stored credentials and documentation
           example: 3f7c8d9e-1a2b-4c5d-8e9f-0a1b2c3d4e5f
-        instruction:
+
+    TransformStepConfig:
+      type: object
+      description: |
+        Configuration for a transform step. Transform steps execute JavaScript code
+        to reshape data between request steps without making external API calls.
+      required:
+        - type
+        - transformCode
+      properties:
+        type:
           type: string
-          description: Human-readable instruction describing what this step does
-          example: Fetch user details from the API
-        modify:
-          type: boolean
-          description: Whether this step can be modified by the self-healing system
-          default: false
-        dataSelector:
+          enum: [transform]
+          description: Type discriminator for transform steps
+        transformCode:
           type: string
           description: |
-            JavaScript function to select data for loop execution.
-            Format: (sourceData) => expression
-          example: "(sourceData) => sourceData.data.items"
-        failureBehavior:
-          type: string
-          enum: [fail, continue]
-          description: How to handle step failures (fail stops execution, continue proceeds to next step)
-          default: fail
+            JavaScript function that transforms sourceData.
+            Format: (sourceData) => transformedData
+            The function receives all previous step results and payload data.
+          example: "(sourceData) => sourceData.getUsers.data.map(u => ({ id: u.id, name: u.fullName }))"
+
+    StepConfig:
+      oneOf:
+        - $ref: "#/components/schemas/RequestStepConfig"
+        - $ref: "#/components/schemas/TransformStepConfig"
+      discriminator:
+        propertyName: type
+        mapping:
+          request: "#/components/schemas/RequestStepConfig"
+          transform: "#/components/schemas/TransformStepConfig"
 
     Pagination:
       type: object
@@ -626,6 +646,7 @@ components:
               type: string
               description: Custom trace ID for log tracking
               example: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+
     Run:
       type: object
       required:
@@ -636,23 +657,15 @@ components:
       properties:
         runId:
           type: string
-          description: Unique identifier for this run (maps to 'id' in GraphQL schema)
+          description: Unique identifier for this run
           example: 7f3e9c1a-2b4d-4e8f-9a3b-1c5d7e9f2a4b
         toolId:
           type: string
           description: ID of the tool that was executed
           example: 550e8400-e29b-41d4-a716-446655440000
         tool:
-          type: object
-          description: Tool metadata (not full configuration, maps to 'toolConfig' in GraphQL)
-          required:
-            - id
-          properties:
-            id:
-              type: string
-            version:
-              type: string
-              example: "2.1.0"
+          $ref: "#/components/schemas/Tool"
+          description: Full tool configuration that was executed
         status:
           type: string
           enum: [running, success, failed, aborted]
@@ -665,11 +678,11 @@ components:
           example: success
         toolPayload:
           type: object
-          description: The inputs and options provided when running the tool (maps to 'toolPayload' in GraphQL)
+          description: The inputs and options provided when running the tool
           additionalProperties: true
         data:
           type: object
-          description: Tool execution results (only present when status is success, maps to 'toolResult' in GraphQL)
+          description: Tool execution results (only present when status is success)
           additionalProperties: true
         error:
           type: string
@@ -722,6 +735,7 @@ components:
             durationMs:
               type: integer
               example: 5234
+
     Error:
       type: object
       required:
