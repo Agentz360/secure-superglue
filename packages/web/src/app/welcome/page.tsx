@@ -15,7 +15,7 @@ import { useRouter } from "next/navigation";
 import { usePostHog } from "posthog-js/react";
 import { useEffect, useState } from "react";
 import { useConfig } from "../config-context";
-import { tokenRegistry } from "@/src/lib/token-registry";
+import { createSuperglueClient } from "@/src/lib/client-utils";
 import { Loader2 } from "lucide-react";
 
 export default function WelcomePage() {
@@ -35,35 +35,10 @@ export default function WelcomePage() {
 
     const checkTenantInfo = async () => {
       try {
-        // TODO: remove once client SDK is updated
-        const response = await fetch(`${config.superglueEndpoint}`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${tokenRegistry.getToken()}`,
-          },
-          body: JSON.stringify({
-            query: `
-              query GetTenantInfo {
-                getTenantInfo {
-                  email
-                  emailEntrySkipped
-                }
-              }
-            `,
-          }),
-        });
+        const client = createSuperglueClient(config.apiEndpoint);
+        const data = await client.getTenantInfo();
 
-        if (!response.ok) {
-          console.error("GraphQL request failed:", response.statusText);
-          setLoading(false);
-          return;
-        }
-
-        const { data } = await response.json();
-
-        // Redirect if either email is set or entry was skipped
-        if (data?.getTenantInfo?.email || data?.getTenantInfo?.emailEntrySkipped) {
+        if (data?.email || data?.emailEntrySkipped) {
           router.push("/");
         }
       } catch (err) {
@@ -74,7 +49,7 @@ export default function WelcomePage() {
     };
 
     checkTenantInfo();
-  }, [router, config.superglueEndpoint]);
+  }, [router, config.apiEndpoint]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -103,37 +78,8 @@ export default function WelcomePage() {
         },
       });
 
-      // TODO: remove once client SDK is updated
-      const response = await fetch(`${config.superglueEndpoint}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${tokenRegistry.getToken()}`,
-        },
-        body: JSON.stringify({
-          query: `
-            mutation SetTenantInfo($email: String!, $emailEntrySkipped: Boolean!) {
-              setTenantInfo(email: $email, emailEntrySkipped: $emailEntrySkipped) {
-                email
-                emailEntrySkipped
-              }
-            }
-          `,
-          variables: {
-            email,
-            emailEntrySkipped: false,
-          },
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error("GraphQL request failed");
-      }
-
-      const result = await response.json();
-      if (result.errors) {
-        throw new Error(result.errors[0]?.message || "Failed to store email");
-      }
+      const client = createSuperglueClient(config.apiEndpoint);
+      await client.setTenantInfo({ email, emailEntrySkipped: false });
 
       // Store in cookies for better performance
       document.cookie = `sg_tenant_email=${encodeURIComponent(email)}; path=/; max-age=31536000; SameSite=Strict`;
@@ -158,35 +104,8 @@ export default function WelcomePage() {
 
   const handleSkip = async () => {
     try {
-      // TODO: remove once client SDK is updated
-      const response = await fetch(`${config.superglueEndpoint}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${tokenRegistry.getToken()}`,
-        },
-        body: JSON.stringify({
-          query: `
-            mutation SetTenantInfo($emailEntrySkipped: Boolean!) {
-              setTenantInfo(emailEntrySkipped: $emailEntrySkipped) {
-                emailEntrySkipped
-              }
-            }
-          `,
-          variables: {
-            emailEntrySkipped: true,
-          },
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error("GraphQL request failed");
-      }
-
-      const result = await response.json();
-      if (result.errors) {
-        throw new Error(result.errors[0]?.message || "Failed to update skip status");
-      }
+      const client = createSuperglueClient(config.apiEndpoint);
+      await client.setTenantInfo({ emailEntrySkipped: true });
 
       // Store in cookies
       document.cookie =
